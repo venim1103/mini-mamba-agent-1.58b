@@ -1,6 +1,6 @@
-**Welcome to the Agentic-1.58b project.**
+# Mini Mamba Agent 1.58b
 
-This repository contains a production-ready PyTorch pipeline for training a state-of-the-art BitMamba Small Language Model (SLM) optimized for reasoning, logic, and tool-use, all constrained to fit on a single 24GB consumer GPU (RTX 3090).
+This repository contains a PyTorch pipeline for training a BitMamba Small Language Model (SLM) optimized for reasoning, logic, and tool-use, all constrained to fit on a single 24GB consumer GPU (RTX 3090).
 
 Rather than relying on quadratic Self-Attention, which limits context windows and crushes consumer hardware, this architecture merges the linear-time sequence modeling of the Mamba-2 architecture with the extreme parameter efficiency of the BitNet b1.58 paradigm.
 
@@ -52,6 +52,16 @@ local_data/
 ```
 
 ## 🛠️ Getting Started
+
+### (0. Optional Development Environment)
+This repository includes devcontainer scripts for running the container inside Podman on VSCode.
+To get Podman working with VSCode devcontainers you have to add this line to your User's settings.json :
+```
+"dev.container.dockerPath":"podman"
+```
+
+For Windows users who utilize WSL, to get GPU passtrough to work inside Podman running on WSL Ubuntu host image, this repository includes a helper setup script to get things set up.
+
 
 ### 1. Installation
 
