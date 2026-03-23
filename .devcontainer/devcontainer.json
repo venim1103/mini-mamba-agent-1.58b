@@ -1,5 +1,5 @@
 {
-  "name": "AI Dev",
+  "name": "Mini Mamba Agent Dev",
   "build": {
     "dockerfile": "Dockerfile",
     "context": ".",
@@ -10,9 +10,11 @@
     }
   },
   "runArgs": [
-    "--gpus", "all",
-    "--env", "NVIDIA_VISIBLE_DEVICES=all",
-    "--env", "NVIDIA_DRIVER_CAPABILITIES=compute,utility"
+    "--device", "nvidia.com/gpu=all"
+  ],
+  "initializeCommand": "mkdir -p /tmp/devcontainer-certs && (cp /etc/ssl/certs/ZscalerRootCertificate-2048-SHA256.pem /tmp/devcontainer-certs/ZscalerRootCertificate-2048-SHA256.crt 2>/dev/null || touch /tmp/devcontainer-certs/ZscalerRootCertificate-2048-SHA256.crt)",
+  "mounts": [
+    "source=/tmp/devcontainer-certs/ZscalerRootCertificate-2048-SHA256.crt,target=/usr/local/share/ca-certificates/ZscalerRootCertificate-2048-SHA256.crt,type=bind,readonly"
   ],
   "features": {},
   "customizations": {
@@ -27,7 +29,7 @@
       }
     }
   },
-  "postCreateCommand": "bash /workspaces/AI/.devcontainer/post-create.sh",
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
   "remoteUser": "vscode",
   "updateRemoteUserUID": true
 }
