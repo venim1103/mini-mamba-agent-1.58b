@@ -25,10 +25,33 @@ if $PIP install --no-cache-dir \
 else
     echo "==> PyPI install failed. Trying local wheels from TORCH..."
     LOCAL_DIR="TORCH"
-    if [ -d "${LOCAL_DIR}" ]; then $PIP install ${LOCAL_DIR}/*.whl && echo "==> Torch installed from local wheels."
+    if [ -d "${LOCAL_DIR}" ]; then
+        $PIP install ${LOCAL_DIR}/*.whl && echo "==> Torch installed from local wheels."
     else
         echo "WARNING: No .whl files found in ${LOCAL_DIR}. Torch is NOT installed."
     fi
+fi
+echo "==> Attempting to install additional packages from PyPI index..."
+if $PIP install --no-cache-dir \
+    transformers \
+    datasets \
+    wandb; then
+    echo "==> Additional packages installed from PyPI index."
+else
+    echo "==> Additional package install failed."
+fi
+
+echo "==> Installing mamba-ssm and causal-conv1d (no build isolation)..."
+# Use --no-build-isolation so these build against the already-installed
+# torch+CUDA version instead of pip pulling the latest (mismatched) torch
+# into an isolated build environment.
+$PIP install --no-cache-dir ninja packaging
+if $PIP install --no-cache-dir --no-build-isolation \
+    "causal-conv1d>=1.4.0" \
+    "mamba-ssm"; then
+    echo "==> mamba-ssm installed successfully."
+else
+    echo "==> mamba-ssm install failed."
 fi
 
 echo "==> Post-create setup complete."

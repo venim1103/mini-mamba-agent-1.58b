@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+FROM docker.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
 
 ARG USERNAME=vscode
 ARG USER_UID=1000
@@ -21,7 +21,7 @@ RUN set -eux; \
     || ! dpkg -s cmake >/dev/null 2>&1; \
     then \
         apt-get update; \
-        apt-get install -y --no-install-recommends sudo ca-certificates build-essential git libcurl4-openssl-dev curl libgomp1 cmake; \
+        apt-get install -y --no-install-recommends sudo ca-certificates build-essential git libcurl4-openssl-dev curl libgomp1 cmake ninja-build; \
         rm -rf /var/lib/apt/lists/*; \
     fi; \
     curl -fsSL "https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh" -o /tmp/miniconda.sh; \
