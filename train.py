@@ -91,6 +91,8 @@ def main():
     
     print(f"Initializing {MODE.upper()} BitMamba Model...")
     model = BitMambaLLM(**MODEL_CONFIG).to(DEVICE)
+    # G12: torch.compile fuses elementwise ops → 10-20% activation memory savings + throughput
+    model = torch.compile(model, mode="reduce-overhead")
     
     muon_opt, adam_opt, mamba_core_opt = setup_mamba_optimizers(model, CURRICULUM_CONFIG)
     scheduler = FGWSD_Scheduler(muon_opt, adam_opt, mamba_core_opt, TOTAL_STEPS, CURRICULUM_CONFIG)
