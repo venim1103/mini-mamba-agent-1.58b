@@ -15,6 +15,13 @@
 import torch
 import math
 
+# G11: Optional 8-bit AdamW for ~0.46 GB optimizer state savings (Parent model)
+try:
+    import bitsandbytes as bnb
+    Adam8bit = bnb.optim.Adam8bit
+except ImportError:
+    Adam8bit = None
+
 class Muon(torch.optim.Optimizer):
     def __init__(self, params, lr=1e-3, momentum=0.95, ns_steps=3):
         defaults = dict(lr=lr, momentum=momentum, ns_steps=ns_steps)
@@ -47,7 +54,7 @@ class Muon(torch.optim.Optimizer):
                     
                 p.data.add_(X.type_as(p.data), alpha=-lr)
 
-def setup_mamba_optimizers(model, config):
+def setup_mamba_optimizers(model, config, use_8bit=True):
     muon_params, adam_params, mamba_sensitive_params = [], [], []
     
     for name, p in model.named_parameters():
@@ -63,11 +70,14 @@ def setup_mamba_optimizers(model, config):
         else:
             adam_params.append(p)
 
+    # G11: Use 8-bit Adam when bitsandbytes is available (~0.46 GB savings)
+    AdamCls = Adam8bit if (use_8bit and Adam8bit is not None) else torch.optim.AdamW
+
     muon_opt = Muon(muon_params, lr=config['peak_lr'])
-    adam_opt = torch.optim.AdamW(adam_params, lr=config['peak_lr'], weight_decay=0.01)
+    adam_opt = AdamCls(adam_params, lr=config['peak_lr'], weight_decay=0.01)
     
     # The dedicated optimizer for the State Space Core (Fixed low LR, 0 Weight Decay)
-    mamba_core_opt = torch.optim.AdamW(
+    mamba_core_opt = AdamCls(
         mamba_sensitive_params, lr=config['peak_lr'] * 0.1, weight_decay=0.0 
     )
 
