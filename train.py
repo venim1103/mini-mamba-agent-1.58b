@@ -56,13 +56,30 @@ CURRICULUM_CONFIG = {
     ]
 }
 
-def create_seq_idx(cu_seqlens, seqlen):
-    """Converts cu_seqlens into Mamba's seq_idx to prevent cross-document memory bleed."""
-    seq_idx = torch.zeros(seqlen, dtype=torch.int32, device=DEVICE)
-    for i in range(len(cu_seqlens) - 1):
-        start, end = cu_seqlens[i].item(), cu_seqlens[i+1].item()
-        seq_idx[start:end] = i
-    return seq_idx.unsqueeze(0).expand(BATCH_SIZE, -1) 
+def create_seq_idx_batch(cu_seqlens_padded, n_segs, seqlen):
+    """Create per-batch-element seq_idx from padded cu_seqlens.
+
+    Args:
+        cu_seqlens_padded: (batch_size, max_n_segs) — padded with -1 sentinels
+        n_segs:            (batch_size,)            — real lengths per element
+        seqlen:            int — current context length
+
+    Returns:
+        seq_idx: (batch_size, seqlen) — int32 tensor on DEVICE
+    """
+    batch_size = cu_seqlens_padded.shape[0]
+    seq_idx = torch.zeros(batch_size, seqlen, dtype=torch.int32, device=DEVICE)
+    for b in range(batch_size):
+        n = n_segs[b].item()
+        cu = cu_seqlens_padded[b, :n]
+        # Filter to boundaries within the current (possibly truncated) context
+        valid = cu[cu <= seqlen]
+        if len(valid) == 0 or valid[-1] != seqlen:
+            valid = torch.cat([valid, torch.tensor([seqlen], dtype=torch.int32)])
+        for i in range(len(valid) - 1):
+            start, end = valid[i].item(), valid[i + 1].item()
+            seq_idx[b, start:end] = i
+    return seq_idx
 
 def main():
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
@@ -85,18 +102,13 @@ def main():
         accumulated_loss = 0.0
         
         for _ in range(GRAD_ACCUM_STEPS):
-            try: x, y, cu_seqlens = next(data_iter)
+            try: x, y, cu_seqlens, n_segs = next(data_iter)
             except StopIteration:
                 data_iter = iter(train_loader)
-                x, y, cu_seqlens = next(data_iter)
+                x, y, cu_seqlens, n_segs = next(data_iter)
             
             x, y = x.to(DEVICE)[:, :current_ctx], y.to(DEVICE)[:, :current_ctx]
-            
-            valid_seqlens = cu_seqlens[cu_seqlens <= current_ctx]
-            if len(valid_seqlens) == 0 or valid_seqlens[-1] != current_ctx:
-                valid_seqlens = torch.cat([valid_seqlens, torch.tensor([current_ctx], dtype=torch.int32)])
-            
-            seq_idx = create_seq_idx(valid_seqlens, current_ctx)
+            seq_idx = create_seq_idx_batch(cu_seqlens, n_segs, current_ctx)
             
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 logits = model(x, seq_idx=seq_idx)

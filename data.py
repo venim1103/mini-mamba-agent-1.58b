@@ -75,6 +75,35 @@ class AgenticDataMixture(IterableDataset):
             name = random.choices(self.stream_names, weights=self.weights, k=1)[0]
             yield next(self.streams[name])
 
+def packed_collate_fn(batch):
+    """Custom collate that handles variable-length cu_seqlens across batch elements.
+
+    Each sample is (x, y, cu_seqlens) where x and y have fixed length but
+    cu_seqlens varies.  We pad cu_seqlens to the longest in the batch with -1
+    sentinel values and return a lengths tensor so consumers know where the
+    real values end.
+
+    Returns:
+        x:            (batch_size, seq_len)      — LongTensor
+        y:            (batch_size, seq_len)      — LongTensor
+        cu_seqlens:   (batch_size, max_n_segs)   — Int32Tensor, padded with -1
+        n_segs:       (batch_size,)              — Int32Tensor, real lengths
+    """
+    xs, ys, cu_list = zip(*batch)
+    x = torch.stack(xs, dim=0)
+    y = torch.stack(ys, dim=0)
+
+    lengths = [cs.shape[0] for cs in cu_list]
+    max_len = max(lengths)
+
+    padded = torch.full((len(cu_list), max_len), -1, dtype=torch.int32)
+    for i, cs in enumerate(cu_list):
+        padded[i, :cs.shape[0]] = cs
+
+    n_segs = torch.tensor(lengths, dtype=torch.int32)
+    return x, y, padded, n_segs
+
+
 def create_dataloaders(datasets_config, tokenizer_path="custom_agentic_tokenizer", max_seq_len=16384, batch_size=2):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     packed_streams, weights = {}, []
@@ -90,5 +119,8 @@ def create_dataloaders(datasets_config, tokenizer_path="custom_agentic_tokenizer
         weights.append(weight)
 
     mixture_dataset = AgenticDataMixture(packed_streams, weights)
-    return DataLoader(mixture_dataset, batch_size=batch_size, num_workers=0, pin_memory=True), tokenizer
+    return DataLoader(
+        mixture_dataset, batch_size=batch_size, num_workers=0,
+        pin_memory=True, collate_fn=packed_collate_fn,
+    ), tokenizer
 
