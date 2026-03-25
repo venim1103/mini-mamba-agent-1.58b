@@ -36,6 +36,10 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 2             
 GRAD_ACCUM_STEPS = 8       
 SAVE_EVERY = 5000
+
+# G10: Use FP16 + GradScaler on Ampere (RTX 3090) for 2x throughput.
+# Set to torch.bfloat16 on Ada Lovelace (RTX 4090) where BF16 == FP16 speed.
+AMP_DTYPE = torch.float16
 CHECKPOINT_DIR = f"checkpoints/bitmamba_{MODE}"
 
 TRAIN_CONFIG = [
@@ -99,6 +103,8 @@ def main():
     data_iter = iter(train_loader)
     total_tokens, t0 = 0, time.time()
     previous_ctx = 16384  # G9: track previous ctx to detect changes
+    # G10: GradScaler for FP16 (no-op when using BF16)
+    scaler = torch.amp.GradScaler(enabled=(AMP_DTYPE == torch.float16))
     
     for step in range(TOTAL_STEPS):
         current_lr, current_ctx, phase_name = scheduler.step(step)
@@ -124,15 +130,17 @@ def main():
             x, y = x.to(DEVICE)[:, :current_ctx], y.to(DEVICE)[:, :current_ctx]
             seq_idx = create_seq_idx_batch(cu_seqlens, n_segs, current_ctx)
             
-            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            with torch.autocast(device_type='cuda', dtype=AMP_DTYPE):
                 # G2: Chunked cross-entropy avoids materializing full [BS, ctx, vocab] logits
                 hidden = model.forward_hidden(x, seq_idx=seq_idx)
                 loss = chunked_cross_entropy(hidden, model.output, y) / GRAD_ACCUM_STEPS
-            loss.backward()
+            scaler.scale(loss).backward()
             accumulated_loss += loss.item()
             
+        for opt in [muon_opt, adam_opt, mamba_core_opt]: scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        for opt in [muon_opt, adam_opt, mamba_core_opt]: opt.step()
+        for opt in [muon_opt, adam_opt, mamba_core_opt]: scaler.step(opt)
+        scaler.update()
         
         if step % 10 == 0:
             t1 = time.time()
