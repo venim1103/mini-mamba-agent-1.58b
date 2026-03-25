@@ -194,6 +194,12 @@ def main():
             prompt = f"<|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n<think>\n"
             input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(DEVICE)
             
+            # G6: Offload optimizer states to CPU during generation (~1.65GB savings)
+            for opt in [muon_opt, adam_opt, mamba_opt]:
+                for state in opt.state.values():
+                    for k, v in state.items():
+                        if isinstance(v, torch.Tensor): state[k] = v.cpu()
+            
             # Generate GROUP_SIZE completions
             model.eval()
             completions_ids, completions_text = [], []
@@ -207,6 +213,12 @@ def main():
                     
             rewards = compute_rewards(completions_text, ground_truth)
             advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+            
+            # G6: Restore optimizer states from CPU back to GPU
+            for opt in [muon_opt, adam_opt, mamba_opt]:
+                for state in opt.state.values():
+                    for k, v in state.items():
+                        if isinstance(v, torch.Tensor): state[k] = v.cuda()
             
             # GRPO policy gradient step
             model.train()

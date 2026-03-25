@@ -216,9 +216,10 @@ class BitMambaBlock(nn.Module):
 
 class BitMambaLLM(nn.Module):
     def __init__(self, vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2,
-                 headdim=64, ngroups=1, chunk_size=256):
+                 headdim=64, ngroups=1, chunk_size=256, use_checkpoint=False):
         super().__init__()
         self.vocab_size = vocab_size
+        self.use_checkpoint = use_checkpoint
         self.tok_embeddings = nn.Embedding(vocab_size, dim)
         
         self.layers = nn.ModuleList()
@@ -233,9 +234,13 @@ class BitMambaLLM(nn.Module):
         self.output.weight = self.tok_embeddings.weight 
 
     def forward(self, input_ids, seq_idx=None):
+        from torch.utils.checkpoint import checkpoint
         x = self.tok_embeddings(input_ids)
         for layer in self.layers:
-            x = layer(x, seq_idx=seq_idx)
+            if self.use_checkpoint and self.training:
+                x = checkpoint(layer, x, seq_idx, use_reentrant=False)
+            else:
+                x = layer(x, seq_idx=seq_idx)
         x = self.norm(x)
         return self.output(x)
 
