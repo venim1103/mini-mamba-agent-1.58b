@@ -118,12 +118,13 @@ def main():
             
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         for opt in [muon_opt, adam_opt, mamba_core_opt]: opt.step()
+
+        tokens_this_step = BATCH_SIZE * GRAD_ACCUM_STEPS * current_ctx
+        total_tokens += tokens_this_step
         
         if step % 10 == 0:
             t1 = time.time()
             dt, t0 = t1 - t0, t1
-            tokens_this_step = BATCH_SIZE * GRAD_ACCUM_STEPS * current_ctx
-            total_tokens += tokens_this_step 
             print(f"Step {step:06d} | {phase_name:<15} | Loss: {accumulated_loss:.4f} | Tok/s: {tokens_this_step/dt:.0f}")
             wandb.log({"Train/Loss": accumulated_loss, "System/Total_Tokens": total_tokens}, step=step)
 

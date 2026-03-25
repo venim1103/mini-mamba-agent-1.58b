@@ -56,6 +56,17 @@ def packed_token_stream(dataset_stream, tokenizer, text_column, max_seq_len):
                 cu_seqlens.append(max_seq_len)
                 remainder = max_seq_len - current_len
                 if len(doc_lengths) > 0: doc_lengths[0] -= remainder
+
+            # The chunk consumes max_seq_len + 1 tokens (x and shifted y), while
+            # cu_seqlens tracks boundaries for the first max_seq_len tokens only.
+            # Consume the additional overlap token from doc_lengths to prevent drift.
+            extra = 1
+            while extra > 0 and len(doc_lengths) > 0:
+                consume = min(extra, doc_lengths[0])
+                doc_lengths[0] -= consume
+                extra -= consume
+                if doc_lengths[0] == 0:
+                    doc_lengths.pop(0)
             
             buffer = buffer[max_seq_len + 1:]
             yield (

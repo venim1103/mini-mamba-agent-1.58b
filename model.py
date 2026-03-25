@@ -41,9 +41,8 @@ def _ternary_quant_kernel(w_ptr, output_ptr, n_elements, scale, BLOCK_SIZE: tl.c
     mask = offsets < n_elements
     w = tl.load(w_ptr + offsets, mask=mask).to(tl.float32)
     w_scaled = w / scale
-    w_quant = tl.math.round(w_scaled)
-    w_quant = tl.maximum(w_quant, -1.0)
-    w_quant = tl.minimum(w_quant, 1.0)
+    # Direct ternary quantization: {-1, 0, 1} with symmetric 0.5 threshold.
+    w_quant = tl.where(w_scaled >= 0.5, 1.0, tl.where(w_scaled <= -0.5, -1.0, 0.0),)
     tl.store(output_ptr + offsets, w_quant, mask=mask)
 
 class TernaryQuantizeSTE(torch.autograd.Function):

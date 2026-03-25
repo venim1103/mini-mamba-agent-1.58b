@@ -29,9 +29,9 @@ def upscaler(small_ckpt_path, output_ckpt_path):
 
     print("Transplanting weights via SOLAR duplication...")
     for key in big_state_dict.keys():
-        if "tok_embeddings" in key or "norm" in key or "output" in key:
+        if key.startswith("tok_embeddings.") or key.startswith("norm.") or key.startswith("output."):
             big_state_dict[key] = small_state_dict[key]
-        elif "layers" in key:
+        elif key.startswith("layers."):
             parts = key.split('.')
             target_layer_idx = int(parts[1])
             
