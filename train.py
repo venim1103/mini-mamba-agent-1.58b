@@ -91,13 +91,27 @@ def main():
     muon_opt, adam_opt, mamba_core_opt = setup_mamba_optimizers(model, CURRICULUM_CONFIG)
     scheduler = FGWSD_Scheduler(muon_opt, adam_opt, mamba_core_opt, TOTAL_STEPS, CURRICULUM_CONFIG)
     
-    train_loader, _ = create_dataloaders(TRAIN_CONFIG, tokenizer_path="custom_agentic_tokenizer", max_seq_len=16384, batch_size=BATCH_SIZE)
+    train_loader, tokenizer = create_dataloaders(
+        TRAIN_CONFIG, tokenizer_path="custom_agentic_tokenizer", 
+        max_seq_len=16384, batch_size=BATCH_SIZE
+    )
     model.train()
     data_iter = iter(train_loader)
     total_tokens, t0 = 0, time.time()
+    previous_ctx = 16384  # G9: track previous ctx to detect changes
     
     for step in range(TOTAL_STEPS):
         current_lr, current_ctx, phase_name = scheduler.step(step)
+        
+        # G9: Recreate DataLoader when context window changes to avoid transfer waste
+        if current_ctx != previous_ctx:
+            train_loader, _ = create_dataloaders(
+                TRAIN_CONFIG, tokenizer_path="custom_agentic_tokenizer",
+                max_seq_len=current_ctx, batch_size=BATCH_SIZE
+            )
+            data_iter = iter(train_loader)
+            previous_ctx = current_ctx
+        
         for opt in [muon_opt, adam_opt, mamba_core_opt]: opt.zero_grad()
         accumulated_loss = 0.0
         
