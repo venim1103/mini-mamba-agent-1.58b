@@ -78,7 +78,7 @@ PyTorch's default `collate_fn` in the DataLoader tries to `torch.stack()` all `c
 
 ---
 
-### 5. ✅ `upscale.py` — Norm check catches layer-internal norms, causing KeyError (upscale.py, Lines 33–35)
+### 5. `upscale.py` — Norm check catches layer-internal norms, causing KeyError (upscale.py, Lines 33–35)
 
 ```python
 if "tok_embeddings" in key or "norm" in key or "output" in key:
@@ -103,7 +103,7 @@ elif "layers." in key:
 
 ## BUGS — Incorrect behavior that doesn't crash
 
-### 6. ✅ Off-by-one in `packed_token_stream` document boundary tracking (data.py, Lines 47–67)
+### 6. Off-by-one in `packed_token_stream` document boundary tracking (data.py, Lines 47–67)
 
 The chunk consumes `max_seq_len + 1` tokens from the buffer (to create overlapping x/y pairs), but the `doc_lengths` bookkeeping only accounts for `max_seq_len` tokens. The extra token eaten per chunk causes `doc_lengths` to slowly **drift out of sync** with the actual buffer contents.
 
@@ -118,7 +118,7 @@ Over many chunks, document boundaries in `cu_seqlens` become progressively incor
 
 ---
 
-### 7. ✅ `total_tokens` counter only updated every 10 steps (train.py, Lines 96–101)
+### 7. `total_tokens` counter only updated every 10 steps (train.py, Lines 96–101)
 
 ```python
 if step % 10 == 0:
@@ -480,17 +480,14 @@ Document this as intentional. Consider whether the embedding should instead be a
 | **P0** | ✅ Fix Mamba-1 vs Mamba-2 architecture (Part I #1-2) | Nemotron-H |
 | **P0** | ✅ Fix Conv1d Muon routing crash (Part I #3) | — |
 | **P0** | ✅ Fix DataLoader cu_seqlens batching (Part I #4) | — |
-| **P0** | ✅ Fix `upscale.py` layer norm key remapping bug (Part I #5) | — |
-| **P1** | ✅ Fix packed stream boundary drift (Part I #6) | — |
-| **P1** | ✅ Fix `total_tokens` accounting (Part I #7) | — |
-| **P1** | ✅ Implement real FG-WSD (data quality progression) | Nanbeige4-3B |
-| **P1** | ✅ Multi-stage SFT (cold-start → mixed → polish) | Nanbeige4-3B, LN-Nano |
-| **P1** | ✅ Add on-policy filtering + curriculum to RL | Nanbeige4-3B, Llama-Nemotron |
-| **P2** | ✅ Hybrid architecture — ~8% GQA attention layers dispersed among Mamba blocks | Nemotron-H |
-| **P2** | ✅ Increase GROUP_SIZE to 8, add format rewards | Llama-Nemotron |
-| **P2** | ✅ Synthetic data generation pipeline (`synth_data.py`) | Nemotron-H, Nanbeige4-3B |
-| **P3** | ✅ Fix context-window strategy (fixed warmup/stable → expand in decay) | Nanbeige4-3B, Nemotron-H |
-| **P3** | ✅ Add continued pre-training after SOLAR upscale | MiniPuzzle insights |
+| **P1** | Implement real FG-WSD (data quality progression) | Nanbeige4-3B |
+| **P1** | Multi-stage SFT (cold-start → mixed → polish) | Nanbeige4-3B, LN-Nano |
+| **P1** | Add on-policy filtering + curriculum to RL | Nanbeige4-3B, Llama-Nemotron |
+| **P2** | Consider hybrid architecture (few attention layers) | Nemotron-H |
+| **P2** | Increase GROUP_SIZE to 8-16, add format rewards | Llama-Nemotron |
+| **P2** | Add synthetic data generation pipeline | Nemotron-H, Nanbeige4-3B |
+| **P3** | Fix context-window strategy (fixed → expand in decay) | Nanbeige4-3B, Nemotron-H |
+| **P3** | Add continued pre-training after SOLAR upscale | MiniPuzzle insights |
 
 ---
 
