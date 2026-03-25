@@ -22,102 +22,240 @@ from model import BitMambaLLM
 from optim import setup_mamba_optimizers
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-SFT_CKPT = "checkpoints/sft/sft_epoch_2.pt" 
-LOCAL_RL_DATA = "local_data/rl" 
+SFT_CKPT = "checkpoints/sft/sft_final.pt"
+LOCAL_RL_DATA = "local_data/rl/reasoning" 
 CHECKPOINT_DIR = "checkpoints/rl"
 MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2)
 
-BATCH_SIZE, GROUP_SIZE, TOTAL_STEPS, PEAK_LR = 1, 4, 10_000, 1e-6             
+BATCH_SIZE = 1
+GROUP_SIZE = 8             # Increased from 4 (Nanbeige4-3B / Llama-Nemotron recommend 8-16)
+TOTAL_STEPS = 10_000
+PEAK_LR = 1e-6
+FILTER_LOW = 0.10          # On-policy filtering: discard if pass_rate < 10%
+FILTER_HIGH = 0.90          # On-policy filtering: discard if pass_rate > 90%
+FILTER_BATCH = 64           # Number of problems to evaluate per filtering round
+MAX_GEN_TOKENS = 512
+
+# ---------------------------------------------------------------------------
+# Reward functions — separated into format and accuracy (Llama-Nemotron §5.1)
+# ---------------------------------------------------------------------------
+
+def compute_format_reward(completion):
+    """Check structural format: <think>...</think> followed by answer."""
+    if "<think>" in completion and "</think>" in completion:
+        parts = completion.split("</think>")
+        if len(parts) >= 2 and parts[-1].strip():
+            return 1.0
+        return 0.5   # tags present but no answer after
+    return 0.0
+
+
+def compute_accuracy_reward(completion, ground_truth):
+    """Check if the final answer (after </think>) contains the ground truth."""
+    if "</think>" not in completion:
+        return 0.0
+    final_answer = completion.split("</think>")[-1].strip()
+    if ground_truth.lower() in final_answer.lower():
+        return 2.0
+    return 0.0
+
+
+def compute_conciseness_penalty(completion):
+    """Penalize verbose thinking relative to answer length."""
+    if "</think>" not in completion:
+        return 0.0
+    parts = completion.split("</think>")
+    thought_text = parts[0].replace("<think>", "").strip()
+    final_answer = parts[-1].strip()
+    thought_ratio = len(thought_text) / max(1, len(final_answer))
+    if thought_ratio > 10.0:
+        return -0.5
+    return 0.0
+
 
 def compute_rewards(completions, ground_truth):
+    """Combined reward: format + accuracy + conciseness + length penalty."""
     rewards = []
     for comp in completions:
-        reward, pass_rate = 0.0, 0
-        if "<think>" in comp and "</think>" in comp:
-            reward += 0.5
-            final_answer = comp.split("</think>")[-1].strip()
-            if ground_truth.lower() in final_answer.lower():
-                reward += 2.0
-                pass_rate = 1
-                
-        if pass_rate == 1: 
-            parts = comp.split("</think>")
-            thought_text = parts[0].replace("<think>", "").strip()
-            final_answer = parts[-1].strip()
-            thought_ratio = len(thought_text) / max(1, len(final_answer))
-            
-            if thought_ratio > 10.0: reward -= 0.5 
-            else: reward += (1.0 / max(1.0, thought_ratio)) 
-            reward -= len(comp) * 0.0001
-            
-        rewards.append(reward)
+        r_format = compute_format_reward(comp)
+        r_accuracy = compute_accuracy_reward(comp, ground_truth)
+        r_concise = compute_conciseness_penalty(comp)
+        r_length = -len(comp) * 0.0001
+        rewards.append(r_format + r_accuracy + r_concise + r_length)
     return torch.tensor(rewards, dtype=torch.float32).to(DEVICE)
+
+# ---------------------------------------------------------------------------
+# On-policy difficulty filtering (Nanbeige4-3B §3.4)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def filter_problems_on_policy(model, tokenizer, problems, eos_id):
+    """Pre-pass: compute per-problem pass rate, keep only those in [FILTER_LOW, FILTER_HIGH]."""
+    filtered = []
+    model.eval()
+    
+    for sample in problems:
+        question = sample.get('problem', sample.get('question', ''))
+        ground_truth = str(sample.get('expected_answer', sample.get('answer', sample.get('solution', ''))))
+        
+        # Use pre-computed pass_rate from dataset if available (OpenMathReasoning)
+        precomputed = sample.get('pass_rate_72b_tir', 'n/a')
+        if precomputed not in ('n/a', None, ''):
+            try:
+                pass_rate = float(precomputed)
+                if FILTER_LOW <= pass_rate <= FILTER_HIGH:
+                    sample['_pass_rate'] = pass_rate
+                    filtered.append(sample)
+                continue
+            except (ValueError, TypeError):
+                pass
+        
+        sys_prompt = "You are a deductive reasoning agent. You must analyze the user's request step-by-step within <think> tags before acting."
+        prompt = f"<|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(DEVICE)
+        
+        # Quick pass-rate estimate with GROUP_SIZE generations
+        n_correct = 0
+        for _ in range(GROUP_SIZE):
+            generated = model.generate(input_ids, max_new_tokens=MAX_GEN_TOKENS, temperature=0.8,
+                                       do_sample=True, eos_token_id=eos_id)
+            gen_text = tokenizer.decode(generated[0][input_ids.shape[1]:], skip_special_tokens=True)
+            if compute_accuracy_reward(gen_text, ground_truth) > 0:
+                n_correct += 1
+        
+        pass_rate = n_correct / GROUP_SIZE
+        if FILTER_LOW <= pass_rate <= FILTER_HIGH:
+            sample['_pass_rate'] = pass_rate
+            filtered.append(sample)
+    
+    return filtered
+
 
 def main():
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     wandb.init(project="Agentic-1.58b-Model", name="run-rl-grpo")
     
     tokenizer = AutoTokenizer.from_pretrained("custom_agentic_tokenizer")
-    files = [os.path.join(LOCAL_RL_DATA, f) for f in os.listdir(LOCAL_RL_DATA) if f.endswith(('.jsonl', '.json', '.parquet'))]
-    fmt = "parquet" if files[0].endswith(".parquet") else "json"
-    dataset = load_dataset(fmt, data_files=files, split="train", streaming=True)
+    eos_id = tokenizer.encode("<|im_end|>", add_special_tokens=False)[0]
+    
+    files = []
+    for root, _, filenames in os.walk(LOCAL_RL_DATA):
+        for f in filenames:
+            if f.endswith((".jsonl", ".json", ".parquet")):
+                files.append(os.path.join(root, f))
+    if not files:
+        raise FileNotFoundError(f"No .json/.jsonl/.parquet files found under {LOCAL_RL_DATA}")
+
+    parquet_files = [f for f in files if f.endswith(".parquet")]
+    json_files = [f for f in files if f.endswith((".json", ".jsonl"))]
+    if parquet_files:
+        dataset = load_dataset("parquet", data_files=parquet_files, split="train", streaming=True)
+    else:
+        dataset = load_dataset("json", data_files=json_files, split="train", streaming=True)
     data_iter = iter(dataset)
     
     model = BitMambaLLM(**MODEL_CONFIG).to(DEVICE)
     model.load_state_dict(torch.load(SFT_CKPT, map_location=DEVICE)['model_state_dict'])
     muon_opt, adam_opt, mamba_opt = setup_mamba_optimizers(model, {"peak_lr": PEAK_LR, "end_lr": 1e-6})
-    
-    for step in range(TOTAL_STEPS):
-        try: sample = next(data_iter)
-        except StopIteration:
-            data_iter = iter(dataset)
-            sample = next(data_iter)
-            
-        question = sample.get('question', sample.get('problem', ''))
-        ground_truth = str(sample.get('answer', sample.get('solution', '')))
+
+    # ---------------------------------------------------------------------------
+    # On-policy filtering + curriculum (easy → hard ordering)
+    # ---------------------------------------------------------------------------
+    step = 0
+    while step < TOTAL_STEPS:
+        # Collect a batch of candidate problems
+        raw_batch = []
+        for _ in range(FILTER_BATCH):
+            try: raw_batch.append(next(data_iter))
+            except StopIteration:
+                data_iter = iter(dataset)
+                raw_batch.append(next(data_iter))
         
-        sys_prompt = "You are a deductive reasoning agent. You must analyze the user's request step-by-step within <think> tags before acting."
-        prompt = f"<|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n<think>\n"
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(DEVICE)
+        # Filter to appropriate difficulty
+        filtered = filter_problems_on_policy(model, tokenizer, raw_batch, eos_id)
+        if not filtered:
+            print(f"  Step {step}: filter returned 0 problems, retrying...")
+            continue
         
-        model.eval()
-        completions_ids, completions_text = [], []
-        with torch.no_grad():
-            for _ in range(GROUP_SIZE):
-                generated = model.generate(input_ids, max_new_tokens=512, temperature=0.8, do_sample=True, eos_token_id=tokenizer.encode("<|im_end|>", add_special_tokens=False)[0])
-                gen_only = generated[0][input_ids.shape[1]:]
-                completions_ids.append(gen_only)
-                completions_text.append(tokenizer.decode(gen_only, skip_special_tokens=True))
+        # Curriculum: sort easy → hard (highest pass_rate first)
+        filtered.sort(key=lambda s: -s['_pass_rate'])
+        print(f"  Step {step}: filtered {len(filtered)}/{FILTER_BATCH} problems (pass_rate range: "
+              f"{filtered[-1]['_pass_rate']:.0%}–{filtered[0]['_pass_rate']:.0%})")
+        
+        # Train on each filtered problem
+        for sample in filtered:
+            if step >= TOTAL_STEPS:
+                break
                 
-        rewards = compute_rewards(completions_text, ground_truth)
-        advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
-        
-        model.train()
-        for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
-        policy_loss = 0.0
-        
-        for i in range(GROUP_SIZE):
-            full_seq = torch.cat([input_ids[0], completions_ids[i]]).unsqueeze(0)
-            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                logits = model(full_seq, seq_idx=None)
-                log_probs = -F.cross_entropy(logits[0, input_ids.shape[1]-1 : -1, :].contiguous(), completions_ids[i].contiguous(), reduction='none')
-                loss = - (log_probs * advantages[i]).mean() / GROUP_SIZE
-            loss.backward()
-            policy_loss += loss.item()
+            question = sample.get('problem', sample.get('question', ''))
+            ground_truth = str(sample.get('expected_answer', sample.get('answer', sample.get('solution', ''))))
             
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        for opt in [muon_opt, adam_opt, mamba_opt]: opt.step()
-        
-        if step % 10 == 0: wandb.log({"RL/Mean_Reward": rewards.mean().item(), "RL/Policy_Loss": policy_loss}, step=step)
-        if step > 0 and step % 1000 == 0: torch.save({'step': step, 'model_state_dict': model.state_dict()}, os.path.join(CHECKPOINT_DIR, f"rl_step_{step:06d}.pt"))
+            sys_prompt = "You are a deductive reasoning agent. You must analyze the user's request step-by-step within <think> tags before acting."
+            prompt = f"<|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+            input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(DEVICE)
+            
+            # Generate GROUP_SIZE completions
+            model.eval()
+            completions_ids, completions_text = [], []
+            with torch.no_grad():
+                for _ in range(GROUP_SIZE):
+                    generated = model.generate(input_ids, max_new_tokens=MAX_GEN_TOKENS, temperature=0.8,
+                                               do_sample=True, eos_token_id=eos_id)
+                    gen_only = generated[0][input_ids.shape[1]:]
+                    completions_ids.append(gen_only.cpu())  # offload to CPU during generation
+                    completions_text.append(tokenizer.decode(gen_only, skip_special_tokens=True))
+                    
+            rewards = compute_rewards(completions_text, ground_truth)
+            advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+            
+            # GRPO policy gradient step
+            model.train()
+            for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
+            policy_loss = 0.0
+            
+            for i in range(GROUP_SIZE):
+                comp_ids = completions_ids[i].to(DEVICE)
+                full_seq = torch.cat([input_ids[0], comp_ids]).unsqueeze(0)
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    logits = model(full_seq, seq_idx=None)
+                    log_probs = -F.cross_entropy(
+                        logits[0, input_ids.shape[1]-1 : -1, :].contiguous(),
+                        comp_ids.contiguous(), reduction='none'
+                    )
+                    loss = -(log_probs * advantages[i]).mean() / GROUP_SIZE
+                loss.backward()
+                policy_loss += loss.item()
+                
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            for opt in [muon_opt, adam_opt, mamba_opt]: opt.step()
+            
+            if step % 10 == 0:
+                wandb.log({
+                    "RL/Mean_Reward": rewards.mean().item(),
+                    "RL/Policy_Loss": policy_loss,
+                    "RL/Format_Reward": sum(compute_format_reward(c) for c in completions_text) / len(completions_text),
+                    "RL/Pass_Rate": sample['_pass_rate'],
+                }, step=step)
+            if step > 0 and step % 1000 == 0:
+                torch.save({'step': step, 'model_state_dict': model.state_dict()},
+                           os.path.join(CHECKPOINT_DIR, f"rl_step_{step:06d}.pt"))
+            step += 1
+    
+    torch.save({'step': step, 'model_state_dict': model.state_dict()},
+               os.path.join(CHECKPOINT_DIR, "rl_final.pt"))
     wandb.finish()
 
+
 @torch.no_grad()
-def generate_wrapper(model, input_ids, max_new_tokens, temperature, do_sample, eos_token_id):
+def generate_wrapper(self, input_ids, max_new_tokens, temperature, do_sample, eos_token_id):
     curr_ids = input_ids
     for _ in range(max_new_tokens):
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16): logits = model(curr_ids, seq_idx=None)
-        next_token = torch.multinomial(F.softmax(logits[0, -1, :] / temperature, dim=-1), num_samples=1)
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            logits = self(curr_ids, seq_idx=None)
+        if do_sample:
+            next_token = torch.multinomial(F.softmax(logits[0, -1, :] / temperature, dim=-1), num_samples=1)
+        else:
+            next_token = logits[0, -1, :].argmax(dim=-1, keepdim=True)
         curr_ids = torch.cat([curr_ids, next_token.unsqueeze(0)], dim=-1)
         if next_token.item() == eos_token_id: break
     return curr_ids

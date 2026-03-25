@@ -39,20 +39,26 @@ SAVE_EVERY = 5000
 CHECKPOINT_DIR = f"checkpoints/bitmamba_{MODE}"
 
 TRAIN_CONFIG = [
-    {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.35},
-    {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.30},
-    {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "weight": 0.20},
-    {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.15}
+    {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "tier": "hq"},
+    {"name": "code",         "path": "local_data/train/code",  "format": "parquet", "tier": "hq"},
+    {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "tier": "mq"},
+    {"name": "tool_use",     "path": "local_data/train/tools", "format": "parquet", "tier": "hq"}
 ]
 
-# UPDATED: Max Context capped at 16k (16384) to safely fit BS=2 on RTX 3090
+# FG-WSD curriculum with per-phase data quality progression (Nanbeige4-3B §2.2.2).
+# Each phase specifies mixture weights {source_name: weight} — sources omitted get 0.
+# Quality tiers: HQ = formal_logic, code, tool_use; MQ = web.
 CURRICULUM_CONFIG = {
     "peak_lr": PEAK_LR, "end_lr": 1.5e-6,
     "phases": [
-        {"pct": 0.05, "ctx": 2048},   
-        {"pct": 0.40, "ctx": 4096},   
-        {"pct": 0.35, "ctx": 8192},   
-        {"pct": 0.20, "ctx": 16384}    
+        # Warmup: mixed quality, short context
+        {"pct": 0.05, "ctx": 2048, "mix": {"formal_logic": 0.30, "code": 0.25, "web": 0.30, "tool_use": 0.15}},
+        # Stable-1 (diversity-enriched): 1 epoch HQ + 1 epoch MQ, medium context
+        {"pct": 0.40, "ctx": 4096, "mix": {"formal_logic": 0.25, "code": 0.25, "web": 0.35, "tool_use": 0.15}},
+        # Stable-2 (high-quality): HQ only, longer context
+        {"pct": 0.35, "ctx": 8192, "mix": {"formal_logic": 0.40, "code": 0.30, "web": 0.00, "tool_use": 0.30}},
+        # Decay: HQ + long-context, max context window
+        {"pct": 0.20, "ctx": 16384, "mix": {"formal_logic": 0.35, "code": 0.30, "web": 0.00, "tool_use": 0.35}}
     ]
 }
 
@@ -91,13 +97,27 @@ def main():
     muon_opt, adam_opt, mamba_core_opt = setup_mamba_optimizers(model, CURRICULUM_CONFIG)
     scheduler = FGWSD_Scheduler(muon_opt, adam_opt, mamba_core_opt, TOTAL_STEPS, CURRICULUM_CONFIG)
     
-    train_loader, _ = create_dataloaders(TRAIN_CONFIG, tokenizer_path="custom_agentic_tokenizer", max_seq_len=16384, batch_size=BATCH_SIZE)
+    initial_mix = CURRICULUM_CONFIG["phases"][0]["mix"]
+    train_loader, _, mixture_dataset = create_dataloaders(
+        TRAIN_CONFIG, tokenizer_path="custom_agentic_tokenizer",
+        max_seq_len=16384, batch_size=BATCH_SIZE, initial_weights=initial_mix
+    )
     model.train()
     data_iter = iter(train_loader)
     total_tokens, t0 = 0, time.time()
+    prev_phase_name = None
     
     for step in range(TOTAL_STEPS):
         current_lr, current_ctx, phase_name = scheduler.step(step)
+
+        # Update data mixture weights on phase transition
+        if phase_name != prev_phase_name:
+            prev_phase_name = phase_name
+            phase_idx = scheduler.current_phase_idx
+            new_mix = CURRICULUM_CONFIG["phases"][phase_idx]["mix"]
+            mixture_dataset.set_weights(new_mix)
+            print(f"Phase → {phase_name} | ctx={current_ctx} | mix={new_mix}")
+
         for opt in [muon_opt, adam_opt, mamba_core_opt]: opt.zero_grad()
         accumulated_loss = 0.0
         

@@ -81,6 +81,7 @@ class FGWSD_Scheduler:
         self.total_steps = total_steps
         
         self.step_boundaries = []
+        self.current_phase_idx = 0
         current_step = 0
         for p in self.phases:
             current_step += int(self.total_steps * p['pct'])
@@ -89,6 +90,7 @@ class FGWSD_Scheduler:
     def get_lr_and_ctx(self, step):
         for i, boundary in enumerate(self.step_boundaries):
             if step < boundary:
+                self.current_phase_idx = i
                 phase = self.phases[i]
                 start_step = self.step_boundaries[i-1] if i > 0 else 0
                 progress = (step - start_step) / (boundary - start_step)

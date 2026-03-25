@@ -18,59 +18,99 @@ import os
 import wandb
 from model import BitMambaLLM
 from optim import setup_mamba_optimizers
-from sft_data import create_sft_dataloader
+from sft_data import SFT_STAGES, create_sft_dataloader
+from transformers import AutoTokenizer
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PRETRAINED_CKPT = "checkpoints/bitmamba_parent/step_1000000.pt" 
-LOCAL_SFT_DATA = "local_data/sft" 
 CHECKPOINT_DIR = "checkpoints/sft"
 MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2)
 
-BATCH_SIZE, GRAD_ACCUM_STEPS, EPOCHS, PEAK_LR = 2, 8, 2, 2e-5             
+BATCH_SIZE = 2
+GRAD_ACCUM_STEPS = 8
 
-def main():
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    wandb.init(project="Agentic-1.58b-Model", name="run-sft-bitmamba")
-    
-    model = BitMambaLLM(**MODEL_CONFIG).to(DEVICE)
-    model.load_state_dict(torch.load(PRETRAINED_CKPT, map_location=DEVICE)['model_state_dict'])
-    
-    train_loader, _ = create_sft_dataloader(LOCAL_SFT_DATA, tokenizer_path="custom_agentic_tokenizer", max_seq_len=4096, batch_size=BATCH_SIZE)
-    
-    muon_opt, adam_opt, mamba_opt = setup_mamba_optimizers(model, {"peak_lr": PEAK_LR, "end_lr": 1e-6})
-    total_steps = len(train_loader) * EPOCHS // GRAD_ACCUM_STEPS
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(adam_opt, T_max=total_steps, eta_min=1e-6)
-    
+
+def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
+    """Run one SFT stage: create dataloader, optimizer, and train for N epochs."""
+    name = stage_cfg["name"]
+    lr = stage_cfg["lr"]
+    epochs = stage_cfg["epochs"]
+
+    train_loader = create_sft_dataloader(
+        stage_cfg["paths"], tokenizer,
+        max_seq_len=stage_cfg["max_seq_len"],
+        batch_size=BATCH_SIZE,
+        reasoning_off_prob=stage_cfg["reasoning_off_prob"],
+    )
+
+    muon_opt, adam_opt, mamba_opt = setup_mamba_optimizers(model, {"peak_lr": lr, "end_lr": lr * 0.1})
+    total_optim_steps = len(train_loader) * epochs // GRAD_ACCUM_STEPS
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(adam_opt, T_max=max(total_optim_steps, 1), eta_min=lr * 0.1)
+
+    print(f"\n{'='*60}")
+    print(f"SFT Stage {stage_num}: {name} | epochs={epochs} lr={lr} samples={len(train_loader.dataset)}")
+    print(f"{'='*60}")
+
     model.train()
-    step = 0
-    for epoch in range(EPOCHS):
+    for epoch in range(epochs):
         for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
         accumulated_loss = 0.0
         
         for batch_idx, (x, y) in enumerate(train_loader):
             x, y = x.to(DEVICE), y.to(DEVICE)
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                # seq_idx=None during SFT assumes 1 document per sequence batch
                 logits = model(x, seq_idx=None) 
-                loss = F.cross_entropy(logits[..., :-1, :].contiguous().view(-1, logits.size(-1)), y[..., 1:].contiguous().view(-1)) / GRAD_ACCUM_STEPS
+                loss = F.cross_entropy(
+                    logits[..., :-1, :].contiguous().view(-1, logits.size(-1)),
+                    y[..., 1:].contiguous().view(-1),
+                    ignore_index=-100,
+                ) / GRAD_ACCUM_STEPS
             loss.backward()
             accumulated_loss += loss.item()
             
             if (batch_idx + 1) % GRAD_ACCUM_STEPS == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                # Sync LRs across optimizer groups
+                current_lr = scheduler.get_last_lr()[0]
                 for opt in [muon_opt, adam_opt]:
-                    for group in opt.param_groups: group['lr'] = scheduler.get_last_lr()[0]
-                for group in mamba_opt.param_groups: group['lr'] = scheduler.get_last_lr()[0] * 0.1
+                    for group in opt.param_groups: group['lr'] = current_lr
+                for group in mamba_opt.param_groups: group['lr'] = current_lr * 0.1
                 
                 for opt in [muon_opt, adam_opt, mamba_opt]: opt.step()
                 scheduler.step()
                 for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
                 
-                if step % 10 == 0: wandb.log({"SFT/Loss": accumulated_loss}, step=step)
+                if global_step % 10 == 0:
+                    wandb.log({
+                        f"SFT/{name}_Loss": accumulated_loss,
+                        "SFT/Stage": stage_num,
+                        "SFT/LR": current_lr,
+                    }, step=global_step)
                 accumulated_loss = 0.0
-                step += 1
+                global_step += 1
                 
-        torch.save({'epoch': epoch, 'model_state_dict': model.state_dict()}, os.path.join(CHECKPOINT_DIR, f"sft_epoch_{epoch+1}.pt"))
+        ckpt_path = os.path.join(CHECKPOINT_DIR, f"sft_stage{stage_num}_{name}_epoch{epoch+1}.pt")
+        torch.save({'stage': stage_num, 'epoch': epoch, 'model_state_dict': model.state_dict()}, ckpt_path)
+        print(f"  Epoch {epoch+1}/{epochs} done → {ckpt_path}")
+
+    return global_step
+
+
+def main():
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    wandb.init(project="Agentic-1.58b-Model", name="run-sft-bitmamba-3stage")
+    
+    tokenizer = AutoTokenizer.from_pretrained("custom_agentic_tokenizer")
+    model = BitMambaLLM(**MODEL_CONFIG).to(DEVICE)
+    model.load_state_dict(torch.load(PRETRAINED_CKPT, map_location=DEVICE)['model_state_dict'])
+    
+    global_step = 0
+    for stage_num, stage_cfg in enumerate(SFT_STAGES, start=1):
+        global_step = run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step)
+    
+    # Save final checkpoint
+    torch.save({'model_state_dict': model.state_dict()}, os.path.join(CHECKPOINT_DIR, "sft_final.pt"))
+    print(f"\nSFT complete. Final checkpoint → {CHECKPOINT_DIR}/sft_final.pt")
     wandb.finish()
 
 if __name__ == "__main__":

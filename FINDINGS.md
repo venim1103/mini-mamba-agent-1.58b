@@ -483,11 +483,11 @@ Document this as intentional. Consider whether the embedding should instead be a
 | **P0** | ✅ Fix `upscale.py` layer norm key remapping bug (Part I #5) | — |
 | **P1** | ✅ Fix packed stream boundary drift (Part I #6) | — |
 | **P1** | ✅ Fix `total_tokens` accounting (Part I #7) | — |
-| **P1** | Implement real FG-WSD (data quality progression) | Nanbeige4-3B |
-| **P1** | Multi-stage SFT (cold-start → mixed → polish) | Nanbeige4-3B, LN-Nano |
-| **P1** | Add on-policy filtering + curriculum to RL | Nanbeige4-3B, Llama-Nemotron |
+| **P1** | ✅ Implement real FG-WSD (data quality progression) | Nanbeige4-3B |
+| **P1** | ✅ Multi-stage SFT (cold-start → mixed → polish) | Nanbeige4-3B, LN-Nano |
+| **P1** | ✅ Add on-policy filtering + curriculum to RL | Nanbeige4-3B, Llama-Nemotron |
 | **P2** | Consider hybrid architecture (few attention layers) | Nemotron-H |
-| **P2** | Increase GROUP_SIZE to 8-16, add format rewards | Llama-Nemotron |
+| **P2** | ✅ Increase GROUP_SIZE to 8, add format rewards | Llama-Nemotron |
 | **P2** | Add synthetic data generation pipeline | Nemotron-H, Nanbeige4-3B |
 | **P3** | Fix context-window strategy (fixed → expand in decay) | Nanbeige4-3B, Nemotron-H |
 | **P3** | Add continued pre-training after SOLAR upscale | MiniPuzzle insights |
