@@ -839,12 +839,12 @@ Typical activation memory savings of 10–20% from fusing elementwise ops. Also 
 
 | # | Fix | VRAM Saved (Parent) | Effort | Priority |
 |---|-----|-------------------|--------|----------|
-| **G1** | Gradient checkpointing | **~12–18 GB** (ctx=16384) | Low | 🔴 Critical |
+| **G1** | ✅ Gradient checkpointing | **~12–18 GB** (ctx=16384) | Low | 🔴 Critical |
 | **G2** | Chunked cross-entropy | **~3.7 GB** (ctx=16384) | Medium | 🔴 Critical |
 | **G3** | ✅ Fix `p.ndim >= 2` → `== 2` | Bug fix + minor VRAM | Trivial | 🔴 Critical |
 | **G4** | ✅ Remove Muon `buf.clone()` | ~1 GB peak | Trivial | 🟡 High |
 | **G5** | ✅ Free BF16 grad after FP32 copy | ~0.5 GB | Trivial | 🟡 High |
-| **G6** | RL optimizer offload to CPU | ~1.65 GB during gen | Low | 🟡 High |
+| **G6** | ✅ RL optimizer offload to CPU | ~1.65 GB during gen | Low | 🟡 High |
 | **G7** | ✅ RL completions to CPU | ~100 MB | Trivial | 🟢 Medium |
 | **G8** | ✅ Dynamic padding in SFT | Variable (up to 5×) | Low | 🟢 Medium |
 | **G9** | ✅ Recreate DataLoader per ctx phase | Saves transfer waste | Low | 🟢 Medium |
