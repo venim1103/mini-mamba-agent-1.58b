@@ -71,6 +71,9 @@ else
     fi
 fi
 
+echo "==> Installing bitsandbytes (G11: 8-bit optimizer states)..."
+$PIP install bitsandbytes 2>/dev/null || echo "  bitsandbytes install failed (optional, will fall back to standard AdamW)"
+
 echo "==> Installing mamba-ssm and causal-conv1d (no build isolation)..."
 # Use --no-build-isolation so these build against the already-installed
 # torch+CUDA version instead of pip pulling the latest (mismatched) torch
