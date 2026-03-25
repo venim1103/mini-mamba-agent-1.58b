@@ -13,7 +13,7 @@ Thorough analysis of the Mini Mamba Agent 1.58b codebase. Part I covers code bug
 
 ## CRITICAL — Will crash or produce incorrect results at runtime
 
-### 1. Wrong import path for `mamba_inner_fn` (model.py, Line 24)
+### 1. ✅ Wrong import path for `mamba_inner_fn` (model.py, Line 24)
 
 ```python
 from mamba_ssm.ops.triton.ssd_combined import mamba_inner_fn
@@ -29,7 +29,7 @@ The `try/except ImportError` block will trigger, but the error message ("Please 
 
 ---
 
-### 2. `mamba_inner_fn` called with wrong function signature (model.py, Lines 133–139)
+### 2. ✅ `mamba_inner_fn` called with wrong function signature (model.py, Lines 133–139)
 
 The code calls:
 ```python
@@ -53,7 +53,7 @@ The block manually performs conv1d → SiLU → x_proj → dt/B/C splitting (Lin
 
 ---
 
-### 3. Conv1d weight incorrectly routed to Muon optimizer (optim.py, Lines 40–47)
+### 3. ✅ Conv1d weight incorrectly routed to Muon optimizer (optim.py, Lines 40–47)
 
 ```python
 elif p.ndim >= 2 and 'weight' in name and 'norm' not in name and 'tok_embeddings' not in name:
@@ -68,7 +68,7 @@ elif p.ndim >= 2 and 'weight' in name and 'norm' not in name and 'tok_embeddings
 
 ---
 
-### 4. DataLoader crashes with batch_size > 1 due to variable-length `cu_seqlens` (data.py / train.py)
+### 4. ✅ DataLoader crashes with batch_size > 1 due to variable-length `cu_seqlens` (data.py / train.py)
 
 `packed_token_stream` yields tuples of `(x, y, cu_seqlens)` where `x` and `y` have a fixed length (`max_seq_len`), but `cu_seqlens` varies in length per sample (depends on how many documents fit in the chunk).
 
@@ -132,7 +132,7 @@ The token count is only accumulated at logging steps, missing 90% of all steps. 
 
 ---
 
-### 8. `create_seq_idx` applies one cu_seqlens to entire batch (train.py, Lines 60–65)
+### 8. ✅ `create_seq_idx` applies one cu_seqlens to entire batch (train.py, Lines 60–65)
 
 ```python
 def create_seq_idx(cu_seqlens, seqlen):
@@ -477,9 +477,9 @@ Document this as intentional. Consider whether the embedding should instead be a
 
 | Priority | Action | Source Insight |
 |---|---|---|
-| **P0** | Fix Mamba-1 vs Mamba-2 architecture (Part I #1-2) | Nemotron-H |
-| **P0** | Fix Conv1d Muon routing crash (Part I #3) | — |
-| **P0** | Fix DataLoader cu_seqlens batching (Part I #4) | — |
+| **P0** | ✅ Fix Mamba-1 vs Mamba-2 architecture (Part I #1-2) | Nemotron-H |
+| **P0** | ✅ Fix Conv1d Muon routing crash (Part I #3) | — |
+| **P0** | ✅ Fix DataLoader cu_seqlens batching (Part I #4) | — |
 | **P1** | Implement real FG-WSD (data quality progression) | Nanbeige4-3B |
 | **P1** | Multi-stage SFT (cold-start → mixed → polish) | Nanbeige4-3B, LN-Nano |
 | **P1** | Add on-policy filtering + curriculum to RL | Nanbeige4-3B, Llama-Nemotron |
