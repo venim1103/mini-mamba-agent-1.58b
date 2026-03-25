@@ -23,9 +23,22 @@ def upscaler(small_ckpt_path, output_ckpt_path):
     
     print("Initializing new 64-Layer Upscaled BitMamba Model...")
     big_model = BitMambaLLM(
-        vocab_size=64000, dim=1024, n_layers=64, d_state=128, expand=2
+        vocab_size=64000, dim=1024, n_layers=64, d_state=128, expand=2,
+        use_attn=True, attn_pct=0.08,
     )
     big_state_dict = big_model.state_dict()
+
+    # Identify which layers are attention vs mamba in each model
+    small_model_tmp = BitMambaLLM(
+        vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2,
+        use_attn=True, attn_pct=0.08,
+    )
+    small_attn_indices = small_model_tmp.attn_indices
+    big_attn_indices = big_model.attn_indices
+    del small_model_tmp
+
+    print(f"Small model attention layers: {sorted(small_attn_indices)}")
+    print(f"Big model attention layers: {sorted(big_attn_indices)}")
 
     print("Transplanting weights via SOLAR duplication...")
     for key in big_state_dict.keys():
@@ -39,10 +52,17 @@ def upscaler(small_ckpt_path, output_ckpt_path):
                 source_layer_idx = target_layer_idx
             else:
                 source_layer_idx = target_layer_idx - 24
+
+            # If layer types differ (attn vs mamba), keep random init
+            target_is_attn = target_layer_idx in big_attn_indices
+            source_is_attn = source_layer_idx in small_attn_indices
+            if target_is_attn != source_is_attn:
+                continue  # skip — incompatible layer type, keep random init
                 
             parts[1] = str(source_layer_idx)
             source_key = '.'.join(parts)
-            big_state_dict[key] = small_state_dict[source_key]
+            if source_key in small_state_dict:
+                big_state_dict[key] = small_state_dict[source_key]
 
     print("Loading mapped weights into the new model...")
     big_model.load_state_dict(big_state_dict)

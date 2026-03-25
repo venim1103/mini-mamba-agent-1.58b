@@ -10,6 +10,7 @@ State Space Models are notoriously sensitive to numerical perturbations. A naive
  * Triton-Accelerated Ternary Projections: The massive, dense linear projection matrices (in_proj, out_proj, x_proj) dominate the layer's memory footprint. These are quantized to strictly \{-1, 0, 1\} using a custom Triton Kernel that fuses the Straight-Through Estimator (STE) directly into the forward pass, eliminating VRAM fragmentation.
  * High-Precision Recurrent Core: The highly sensitive state transition matrix (A) operates exponentially over time and must remain continuous. We strictly isolate the A matrix, the discrete step size (δ), and the input/output state mappings (B, C) in FP16/FP32 precision.
  * Linear Context Scaling (16k+): By using Tri Dao's `mamba_chunk_scan_combined` for the Mamba-2 SSD core alongside our ternary projections, we scale the context window to 16,384 tokens with flat VRAM usage, allowing the agent to execute 50+ step tool-use trajectories.
+ * Hybrid Mamba-Attention (Nemotron-H §2.1): ~8% of layers are lightweight Grouped-Query Attention blocks (GQA with 4 KV-heads) dispersed evenly among Mamba-2 blocks. This closes the retrieval gap for tool-name/parameter recall from system prompts while preserving the linear-context advantage.
  * State Bleed Prevention: Our 0% padding dataloader uses a custom seq_idx tensor passed directly to the Mamba core to flush the recurrent state at document boundaries, preventing logic contamination.
 
 **🚀 The 3-Phase Training Engine**
@@ -34,9 +35,9 @@ State Space Models are notoriously sensitive to numerical perturbations. A naive
 ## 📈 The Model Family Workflow
 | Model Tier | Parameters | Layers | Dim | Steps | Purpose |
 |---|---|---|---|---|---|
-| Scout | ~77M | 24 | 512 | 100,000 | Fast validation of the BitMamba block, QAT stability, and pipeline integrity. |
-| Parent | ~360M | 40 | 1024 | 1,000,000 | The primary pre-training marathon. |
-| Upscaled | ~550M | 64 | 1024 | N/A | Generated via SOLAR-style layer duplication from the Parent (requires continued pre-training). |
+| Scout | ~77M | 24 (2 attn) | 512 | 100,000 | Fast validation of the BitMamba block, QAT stability, and pipeline integrity. |
+| Parent | ~360M | 40 (3 attn) | 1024 | 1,000,000 | The primary pre-training marathon. |
+| Upscaled | ~550M | 64 (5 attn) | 1024 | N/A | Generated via SOLAR-style layer duplication from the Parent (requires continued pre-training). |
 
 ## 📂 Project & Data Structure
 
@@ -160,6 +161,23 @@ Once the Parent model is trained, execute the fine-tuning pipelines:
 python sft_train.py
 python rl_train.py
 ```
+
+### 5. (Optional) Synthetic Data Augmentation
+
+Generate additional training data from your existing corpus using the trained model:
+
+```bash
+# Generate QA pairs from web data
+python synth_data.py --strategy diverse_qa --input local_data/train/web --output local_data/synth/web_qa
+
+# Distill code into concise examples
+python synth_data.py --strategy distill --input local_data/train/code --output local_data/synth/code_distill
+
+# Extract structured knowledge
+python synth_data.py --strategy extract --input local_data/train/web --output local_data/synth/web_extract
+```
+
+Available strategies: `diverse_qa`, `distill`, `extract`, `knowledge`, `rephrase` (Nemotron-H §2.3).
 
 ## 📝 License
 This project's source code is licensed under the **Apache License 2.0**. See the `LICENSE` file for full details. 
