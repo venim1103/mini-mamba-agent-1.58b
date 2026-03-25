@@ -53,7 +53,7 @@ def setup_mamba_optimizers(model, config):
         if not p.requires_grad: continue
         
         # ISOLATION: The sensitive continuous Mamba parameters
-        if any(key in name for key in ['A_log', 'D', 'dt_proj']):
+        if any(key in name for key in ['A_log', 'D', 'dt_bias', 'dt_proj']):
             mamba_sensitive_params.append(p)
         # Muon handles the 2D BitLinear weights
         elif p.ndim >= 2 and 'weight' in name and 'norm' not in name and 'tok_embeddings' not in name:
