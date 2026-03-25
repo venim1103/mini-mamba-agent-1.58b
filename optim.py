@@ -16,7 +16,7 @@ import torch
 import math
 
 class Muon(torch.optim.Optimizer):
-    def __init__(self, params, lr=1e-3, momentum=0.95, ns_steps=5):
+    def __init__(self, params, lr=1e-3, momentum=0.95, ns_steps=3):
         defaults = dict(lr=lr, momentum=momentum, ns_steps=ns_steps)
         super().__init__(params, defaults)
 
@@ -29,16 +29,17 @@ class Muon(torch.optim.Optimizer):
                 if p.grad is None: continue
                 
                 g = p.grad.data.float()
+                p.grad = None  # Free BF16 gradient memory (G5)
+                
                 state = self.state[p]
                 if len(state) == 0:
                     state['momentum_buffer'] = torch.zeros_like(g)
                 
                 buf = state['momentum_buffer']
                 buf.mul_(momentum).add_(g)
-                g = buf.clone()
                 
                 a, b, c = (3.4445, -4.7750, 2.0315)
-                X = g / (g.norm(keepdim=True) + 1e-8)
+                X = buf / (buf.norm(keepdim=True) + 1e-8)  # New tensor, buf stays intact (G4)
                 for _ in range(ns_steps):
                     A = X @ X.T
                     B = b * A + c * A @ A
@@ -81,7 +82,6 @@ class FGWSD_Scheduler:
         self.total_steps = total_steps
         
         self.step_boundaries = []
-        self.current_phase_idx = 0
         current_step = 0
         for p in self.phases:
             current_step += int(self.total_steps * p['pct'])
@@ -90,7 +90,6 @@ class FGWSD_Scheduler:
     def get_lr_and_ctx(self, step):
         for i, boundary in enumerate(self.step_boundaries):
             if step < boundary:
-                self.current_phase_idx = i
                 phase = self.phases[i]
                 start_step = self.step_boundaries[i-1] if i > 0 else 0
                 progress = (step - start_step) / (boundary - start_step)
