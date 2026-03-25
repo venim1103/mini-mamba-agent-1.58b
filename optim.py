@@ -55,8 +55,8 @@ def setup_mamba_optimizers(model, config):
         # ISOLATION: The sensitive continuous Mamba parameters
         if any(key in name for key in ['A_log', 'D', 'dt_bias', 'dt_proj']):
             mamba_sensitive_params.append(p)
-        # Muon handles the 2D BitLinear weights
-        elif p.ndim >= 2 and 'weight' in name and 'norm' not in name and 'tok_embeddings' not in name:
+        # Muon handles the 2D BitLinear weights (ndim == 2 excludes 3D conv1d weights)
+        elif p.ndim == 2 and 'weight' in name and 'norm' not in name and 'tok_embeddings' not in name:
             muon_params.append(p)
         # AdamW handles biases, norms, and embeddings
         else:
