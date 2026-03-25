@@ -244,3 +244,47 @@ class BitMambaLLM(nn.Module):
         x = self.norm(x)
         return self.output(x)
 
+    def forward_hidden(self, input_ids, seq_idx=None):
+        """Return pre-logit hidden states (G2: for chunked cross-entropy)."""
+        from torch.utils.checkpoint import checkpoint
+        x = self.tok_embeddings(input_ids)
+        for layer in self.layers:
+            if self.use_checkpoint and self.training:
+                x = checkpoint(layer, x, seq_idx, use_reentrant=False)
+            else:
+                x = layer(x, seq_idx=seq_idx)
+        return self.norm(x)
+
+
+def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024):
+    """Compute cross-entropy without materializing the full logits tensor.
+
+    Instead of computing logits for the entire sequence at once (which for
+    [BS, 16384, 64000] costs ~3.9 GB), this applies the output projection
+    in chunks of ``chunk_size`` tokens along the sequence dimension.
+
+    Args:
+        hidden:      (BS, seq_len, dim) — pre-logit hidden states from forward_hidden
+        output_proj: nn.Module — the output head (model.output)
+        targets:     (BS, seq_len)  — target token ids
+        chunk_size:  int — number of tokens per chunk (default 1024)
+
+    Returns:
+        Scalar loss (mean cross-entropy over all tokens).
+    """
+    bs, seq_len, _ = hidden.shape
+    total_loss = 0.0
+    n_tokens = bs * seq_len
+
+    for i in range(0, seq_len, chunk_size):
+        end = min(i + chunk_size, seq_len)
+        chunk_logits = output_proj(hidden[:, i:end, :])          # (BS, chunk, vocab)
+        chunk_targets = targets[:, i:end].reshape(-1)             # (BS * chunk,)
+        total_loss += F.cross_entropy(
+            chunk_logits.reshape(-1, chunk_logits.size(-1)),
+            chunk_targets,
+            reduction='sum',
+        )
+
+    return total_loss / n_tokens
+

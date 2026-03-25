@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import os
 import time
 import wandb
-from model import BitMambaLLM
+from model import BitMambaLLM, chunked_cross_entropy
 from data import create_dataloaders
 from optim import setup_mamba_optimizers, FGWSD_Scheduler
 
@@ -125,8 +125,9 @@ def main():
             seq_idx = create_seq_idx_batch(cu_seqlens, n_segs, current_ctx)
             
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                logits = model(x, seq_idx=seq_idx)
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1)) / GRAD_ACCUM_STEPS
+                # G2: Chunked cross-entropy avoids materializing full [BS, ctx, vocab] logits
+                hidden = model.forward_hidden(x, seq_idx=seq_idx)
+                loss = chunked_cross_entropy(hidden, model.output, y) / GRAD_ACCUM_STEPS
             loss.backward()
             accumulated_loss += loss.item()
             
