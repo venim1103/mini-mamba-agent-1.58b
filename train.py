@@ -24,11 +24,11 @@ from optim import setup_mamba_optimizers, FGWSD_Scheduler
 MODE = "scout" 
 
 if MODE == "scout":
-    MODEL_CONFIG = dict(vocab_size=64000, dim=512, n_layers=24, d_state=64, expand=2)
+    MODEL_CONFIG = dict(vocab_size=64000, dim=512, n_layers=24, d_state=64, expand=2, use_checkpoint=True)
     TOTAL_STEPS = 100_000 
     PEAK_LR = 4.5e-4 
 else:
-    MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2)
+    MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2, use_checkpoint=True)
     TOTAL_STEPS = 1_000_000 
     PEAK_LR = 3.0e-4 
 
