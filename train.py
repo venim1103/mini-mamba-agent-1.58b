@@ -21,29 +21,16 @@ from model import BitMambaLLM
 from data import create_dataloaders
 from optim import setup_mamba_optimizers, FGWSD_Scheduler
 
-MODE = os.getenv("MODE", "scout").lower()
+MODE = "scout" 
 
 if MODE == "scout":
     MODEL_CONFIG = dict(vocab_size=64000, dim=512, n_layers=24, d_state=64, expand=2)
-    TOTAL_STEPS = 100_000
-    PEAK_LR = 4.5e-4
-    BASE_CTX = 4096
-    INIT_CKPT = None
-elif MODE == "parent":
-    MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2)
-    TOTAL_STEPS = 1_000_000
-    PEAK_LR = 3.0e-4
-    BASE_CTX = 8192
-    INIT_CKPT = None
-elif MODE == "upscaled":
-    MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=64, d_state=128, expand=2)
-    # Continued pre-training after SOLAR upscaling (short stabilization run).
-    TOTAL_STEPS = 150_000
-    PEAK_LR = 1.5e-4
-    BASE_CTX = 8192
-    INIT_CKPT = "checkpoints/upscaled/step_000000_1B_mamba.pt"
+    TOTAL_STEPS = 100_000 
+    PEAK_LR = 4.5e-4 
 else:
-    raise ValueError("MODE must be one of: scout, parent, upscaled")
+    MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2)
+    TOTAL_STEPS = 1_000_000 
+    PEAK_LR = 3.0e-4 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 2             
@@ -52,24 +39,20 @@ SAVE_EVERY = 5000
 CHECKPOINT_DIR = f"checkpoints/bitmamba_{MODE}"
 
 TRAIN_CONFIG = [
-    {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "tier": "hq"},
-    {"name": "code",         "path": "local_data/train/code",  "format": "parquet", "tier": "hq"},
-    {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "tier": "mq"},
-    {"name": "tool_use",     "path": "local_data/train/tools", "format": "parquet", "tier": "hq"}
+    {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.35},
+    {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.30},
+    {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "weight": 0.20},
+    {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.15}
 ]
 
-# FG-WSD curriculum with per-phase data quality progression (Nanbeige4-3B §2.2.2).
-# Each phase specifies mixture weights {source_name: weight} — sources omitted get 0.
-# Quality tiers: HQ = formal_logic, code, tool_use; MQ = web.
+# UPDATED: Max Context capped at 16k (16384) to safely fit BS=2 on RTX 3090
 CURRICULUM_CONFIG = {
     "peak_lr": PEAK_LR, "end_lr": 1.5e-6,
     "phases": [
-        # Warmup + stable phases use fixed context; only decay expands context.
-        {"pct": 0.05, "ctx": BASE_CTX, "mix": {"formal_logic": 0.30, "code": 0.25, "web": 0.30, "tool_use": 0.15}},
-        {"pct": 0.40, "ctx": BASE_CTX, "mix": {"formal_logic": 0.25, "code": 0.25, "web": 0.35, "tool_use": 0.15}},
-        {"pct": 0.35, "ctx": BASE_CTX, "mix": {"formal_logic": 0.40, "code": 0.30, "web": 0.00, "tool_use": 0.30}},
-        # Decay: HQ + long-context, max context window
-        {"pct": 0.20, "ctx": 16384, "mix": {"formal_logic": 0.35, "code": 0.30, "web": 0.00, "tool_use": 0.35}}
+        {"pct": 0.05, "ctx": 2048},   
+        {"pct": 0.40, "ctx": 4096},   
+        {"pct": 0.35, "ctx": 8192},   
+        {"pct": 0.20, "ctx": 16384}    
     ]
 }
 
@@ -104,41 +87,17 @@ def main():
     
     print(f"Initializing {MODE.upper()} BitMamba Model...")
     model = BitMambaLLM(**MODEL_CONFIG).to(DEVICE)
-    start_step = 0
-    if INIT_CKPT is not None:
-        if not os.path.exists(INIT_CKPT):
-            raise FileNotFoundError(f"MODE=upscaled requires checkpoint at {INIT_CKPT}")
-        ckpt = torch.load(INIT_CKPT, map_location=DEVICE)
-        state_dict = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
-        model.load_state_dict(state_dict)
-        start_step = int(ckpt.get("step", 0)) if isinstance(ckpt, dict) else 0
-        print(f"Loaded init checkpoint: {INIT_CKPT} (start_step={start_step})")
     
     muon_opt, adam_opt, mamba_core_opt = setup_mamba_optimizers(model, CURRICULUM_CONFIG)
     scheduler = FGWSD_Scheduler(muon_opt, adam_opt, mamba_core_opt, TOTAL_STEPS, CURRICULUM_CONFIG)
     
-    initial_mix = CURRICULUM_CONFIG["phases"][0]["mix"]
-    train_loader, _, mixture_dataset = create_dataloaders(
-        TRAIN_CONFIG, tokenizer_path="custom_agentic_tokenizer",
-        max_seq_len=16384, batch_size=BATCH_SIZE, initial_weights=initial_mix
-    )
+    train_loader, _ = create_dataloaders(TRAIN_CONFIG, tokenizer_path="custom_agentic_tokenizer", max_seq_len=16384, batch_size=BATCH_SIZE)
     model.train()
     data_iter = iter(train_loader)
     total_tokens, t0 = 0, time.time()
-    prev_phase_name = None
     
-    for step in range(start_step, start_step + TOTAL_STEPS):
-        local_step = step - start_step
-        current_lr, current_ctx, phase_name = scheduler.step(local_step)
-
-        # Update data mixture weights on phase transition
-        if phase_name != prev_phase_name:
-            prev_phase_name = phase_name
-            phase_idx = scheduler.current_phase_idx
-            new_mix = CURRICULUM_CONFIG["phases"][phase_idx]["mix"]
-            mixture_dataset.set_weights(new_mix)
-            print(f"Phase → {phase_name} | ctx={current_ctx} | mix={new_mix}")
-
+    for step in range(TOTAL_STEPS):
+        current_lr, current_ctx, phase_name = scheduler.step(step)
         for opt in [muon_opt, adam_opt, mamba_core_opt]: opt.zero_grad()
         accumulated_loss = 0.0
         
@@ -159,13 +118,12 @@ def main():
             
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         for opt in [muon_opt, adam_opt, mamba_core_opt]: opt.step()
-
-        tokens_this_step = BATCH_SIZE * GRAD_ACCUM_STEPS * current_ctx
-        total_tokens += tokens_this_step
         
         if step % 10 == 0:
             t1 = time.time()
             dt, t0 = t1 - t0, t1
+            tokens_this_step = BATCH_SIZE * GRAD_ACCUM_STEPS * current_ctx
+            total_tokens += tokens_this_step 
             print(f"Step {step:06d} | {phase_name:<15} | Loss: {accumulated_loss:.4f} | Tok/s: {tokens_this_step/dt:.0f}")
             wandb.log({"Train/Loss": accumulated_loss, "System/Total_Tokens": total_tokens}, step=step)
 

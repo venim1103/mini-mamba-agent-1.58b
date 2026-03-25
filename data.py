@@ -56,17 +56,6 @@ def packed_token_stream(dataset_stream, tokenizer, text_column, max_seq_len):
                 cu_seqlens.append(max_seq_len)
                 remainder = max_seq_len - current_len
                 if len(doc_lengths) > 0: doc_lengths[0] -= remainder
-
-            # The chunk consumes max_seq_len + 1 tokens (x and shifted y), while
-            # cu_seqlens tracks boundaries for the first max_seq_len tokens only.
-            # Consume the additional overlap token from doc_lengths to prevent drift.
-            extra = 1
-            while extra > 0 and len(doc_lengths) > 0:
-                consume = min(extra, doc_lengths[0])
-                doc_lengths[0] -= consume
-                extra -= consume
-                if doc_lengths[0] == 0:
-                    doc_lengths.pop(0)
             
             buffer = buffer[max_seq_len + 1:]
             yield (
@@ -80,15 +69,7 @@ class AgenticDataMixture(IterableDataset):
         super().__init__()
         self.stream_names = list(streams_dict.keys())
         self.streams = streams_dict
-        self.weights = list(target_proportions)
-
-    def set_weights(self, weight_dict):
-        """Update mixture weights from a {name: weight} dict (phase transition)."""
-        self.weights = [weight_dict.get(n, 0.0) for n in self.stream_names]
-        # If all weights are zero (shouldn't happen), fall back to uniform
-        if sum(self.weights) == 0:
-            self.weights = [1.0] * len(self.stream_names)
-
+        self.weights = target_proportions
     def __iter__(self):
         while True:
             name = random.choices(self.stream_names, weights=self.weights, k=1)[0]
@@ -123,29 +104,23 @@ def packed_collate_fn(batch):
     return x, y, padded, n_segs
 
 
-def create_dataloaders(datasets_config, tokenizer_path="custom_agentic_tokenizer", max_seq_len=16384, batch_size=2, initial_weights=None):
+def create_dataloaders(datasets_config, tokenizer_path="custom_agentic_tokenizer", max_seq_len=16384, batch_size=2):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     packed_streams, weights = {}, []
     
     for config in datasets_config:
-        name, target_path, fmt = config["name"], config["path"], config["format"]
+        name, target_path, fmt, weight = config["name"], config["path"], config["format"], config["weight"]
         data_files = os.path.join(target_path, f"**/*.{fmt}") if os.path.isdir(target_path) else target_path
         
         raw_dataset = load_dataset(fmt, data_files=data_files, split='train', streaming=True)
         text_column = get_text_column(raw_dataset)
         infinite_raw_stream = create_infinite_stream(raw_dataset)
         packed_streams[name] = iter(packed_token_stream(infinite_raw_stream, tokenizer, text_column, max_seq_len))
-
-    # Use initial_weights if provided (dict of name→weight), else uniform
-    if initial_weights:
-        weights = [initial_weights.get(name, 0.0) for name in packed_streams]
-    else:
-        weights = [1.0 / len(packed_streams)] * len(packed_streams)
+        weights.append(weight)
 
     mixture_dataset = AgenticDataMixture(packed_streams, weights)
-    loader = DataLoader(
+    return DataLoader(
         mixture_dataset, batch_size=batch_size, num_workers=0,
         pin_memory=True, collate_fn=packed_collate_fn,
-    )
-    return loader, tokenizer, mixture_dataset
+    ), tokenizer
 
