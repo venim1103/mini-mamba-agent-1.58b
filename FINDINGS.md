@@ -489,8 +489,8 @@ Document this as intentional. Consider whether the embedding should instead be a
 | **P2** | ✅ Hybrid architecture — ~8% GQA attention layers dispersed among Mamba blocks | Nemotron-H |
 | **P2** | ✅ Increase GROUP_SIZE to 8, add format rewards | Llama-Nemotron |
 | **P2** | ✅ Synthetic data generation pipeline (`synth_data.py`) | Nemotron-H, Nanbeige4-3B |
-| **P3** | Fix context-window strategy (fixed → expand in decay) | Nanbeige4-3B, Nemotron-H |
-| **P3** | Add continued pre-training after SOLAR upscale | MiniPuzzle insights |
+| **P3** | ✅ Fix context-window strategy (fixed warmup/stable → expand in decay) | Nanbeige4-3B, Nemotron-H |
+| **P3** | ✅ Add continued pre-training after SOLAR upscale | MiniPuzzle insights |
 
 ---
 

@@ -18,7 +18,7 @@ State Space Models are notoriously sensitive to numerical perturbations. A naive
 *Phase 1: Pre-Training (The Logic Core)*
 
  * Isolated Multi-Optimizer Routing: 2D ternary weight matrices are routed to the Muon optimizer. The continuous State Space parameters (A, δ) are routed to a dedicated AdamW optimizer with a strictly lower, fixed learning rate (10x smaller) and zero weight decay to prevent the recurrent core from destabilizing during Quantization-Aware Training.
- * 4-Phase FG-WSD Curriculum: Implements progressive data quality refinement across phases (Nanbeige4-3B §2.2.2) — early phases mix high-quality (logic, code, tools) and medium-quality (web) data, while later phases train exclusively on HQ sources. Context expands from 2k to 16k in the final decay phase.
+ * 4-Phase FG-WSD Curriculum: Implements progressive data quality refinement across phases (Nanbeige4-3B §2.2.2) — early phases mix high-quality (logic, code, tools) and medium-quality (web), while later phases train exclusively on HQ sources. Context is fixed in warmup/stable phases (Scout: 4k, Parent/Upscaled: 8k) and expands to 16k only in decay.
 
 *Phase 2: Supervised Fine-Tuning (3-Stage Pipeline)*
 
@@ -37,7 +37,7 @@ State Space Models are notoriously sensitive to numerical perturbations. A naive
 |---|---|---|---|---|---|
 | Scout | ~77M | 24 (2 attn) | 512 | 100,000 | Fast validation of the BitMamba block, QAT stability, and pipeline integrity. |
 | Parent | ~360M | 40 (3 attn) | 1024 | 1,000,000 | The primary pre-training marathon. |
-| Upscaled | ~550M | 64 (5 attn) | 1024 | N/A | Generated via SOLAR-style layer duplication from the Parent (requires continued pre-training). |
+| Upscaled | ~550M | 64 (5 attn) | 1024 | 150,000+ (continued) | Generated via SOLAR-style layer duplication from the Parent and then continued pre-trained (required). |
 
 ## 📂 Project & Data Structure
 
@@ -147,10 +147,17 @@ python train_tokenizer.py
 
 ### 3. Launch Phase 1 (Pre-Training)
 
-Log in to Weights & Biases (wandb login). Open train.py and set the mode toggle at the top to MODE = "scout", then execute:
+Log in to Weights & Biases (wandb login), then choose a mode via env var (`scout`, `parent`, `upscaled`):
 
 ```bash
-python train.py
+MODE=scout python train.py
+# MODE=parent python train.py
+```
+
+For post-upscale continued pre-training (required after running `upscale.py`):
+
+```bash
+MODE=upscaled python train.py
 ```
 
 ### 4. Phase 2 & 3 (SFT and RL)

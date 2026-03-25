@@ -21,16 +21,29 @@ from model import BitMambaLLM
 from data import create_dataloaders
 from optim import setup_mamba_optimizers, FGWSD_Scheduler
 
-MODE = "scout" 
+MODE = os.getenv("MODE", "scout").lower()
 
 if MODE == "scout":
     MODEL_CONFIG = dict(vocab_size=64000, dim=512, n_layers=24, d_state=64, expand=2)
-    TOTAL_STEPS = 100_000 
-    PEAK_LR = 4.5e-4 
-else:
+    TOTAL_STEPS = 100_000
+    PEAK_LR = 4.5e-4
+    BASE_CTX = 4096
+    INIT_CKPT = None
+elif MODE == "parent":
     MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2)
-    TOTAL_STEPS = 1_000_000 
-    PEAK_LR = 3.0e-4 
+    TOTAL_STEPS = 1_000_000
+    PEAK_LR = 3.0e-4
+    BASE_CTX = 8192
+    INIT_CKPT = None
+elif MODE == "upscaled":
+    MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=64, d_state=128, expand=2)
+    # Continued pre-training after SOLAR upscaling (short stabilization run).
+    TOTAL_STEPS = 150_000
+    PEAK_LR = 1.5e-4
+    BASE_CTX = 8192
+    INIT_CKPT = "checkpoints/upscaled/step_000000_1B_mamba.pt"
+else:
+    raise ValueError("MODE must be one of: scout, parent, upscaled")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 2             
@@ -51,12 +64,10 @@ TRAIN_CONFIG = [
 CURRICULUM_CONFIG = {
     "peak_lr": PEAK_LR, "end_lr": 1.5e-6,
     "phases": [
-        # Warmup: mixed quality, short context
-        {"pct": 0.05, "ctx": 2048, "mix": {"formal_logic": 0.30, "code": 0.25, "web": 0.30, "tool_use": 0.15}},
-        # Stable-1 (diversity-enriched): 1 epoch HQ + 1 epoch MQ, medium context
-        {"pct": 0.40, "ctx": 4096, "mix": {"formal_logic": 0.25, "code": 0.25, "web": 0.35, "tool_use": 0.15}},
-        # Stable-2 (high-quality): HQ only, longer context
-        {"pct": 0.35, "ctx": 8192, "mix": {"formal_logic": 0.40, "code": 0.30, "web": 0.00, "tool_use": 0.30}},
+        # Warmup + stable phases use fixed context; only decay expands context.
+        {"pct": 0.05, "ctx": BASE_CTX, "mix": {"formal_logic": 0.30, "code": 0.25, "web": 0.30, "tool_use": 0.15}},
+        {"pct": 0.40, "ctx": BASE_CTX, "mix": {"formal_logic": 0.25, "code": 0.25, "web": 0.35, "tool_use": 0.15}},
+        {"pct": 0.35, "ctx": BASE_CTX, "mix": {"formal_logic": 0.40, "code": 0.30, "web": 0.00, "tool_use": 0.30}},
         # Decay: HQ + long-context, max context window
         {"pct": 0.20, "ctx": 16384, "mix": {"formal_logic": 0.35, "code": 0.30, "web": 0.00, "tool_use": 0.35}}
     ]
@@ -93,6 +104,15 @@ def main():
     
     print(f"Initializing {MODE.upper()} BitMamba Model...")
     model = BitMambaLLM(**MODEL_CONFIG).to(DEVICE)
+    start_step = 0
+    if INIT_CKPT is not None:
+        if not os.path.exists(INIT_CKPT):
+            raise FileNotFoundError(f"MODE=upscaled requires checkpoint at {INIT_CKPT}")
+        ckpt = torch.load(INIT_CKPT, map_location=DEVICE)
+        state_dict = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
+        model.load_state_dict(state_dict)
+        start_step = int(ckpt.get("step", 0)) if isinstance(ckpt, dict) else 0
+        print(f"Loaded init checkpoint: {INIT_CKPT} (start_step={start_step})")
     
     muon_opt, adam_opt, mamba_core_opt = setup_mamba_optimizers(model, CURRICULUM_CONFIG)
     scheduler = FGWSD_Scheduler(muon_opt, adam_opt, mamba_core_opt, TOTAL_STEPS, CURRICULUM_CONFIG)
@@ -107,8 +127,9 @@ def main():
     total_tokens, t0 = 0, time.time()
     prev_phase_name = None
     
-    for step in range(TOTAL_STEPS):
-        current_lr, current_ctx, phase_name = scheduler.step(step)
+    for step in range(start_step, start_step + TOTAL_STEPS):
+        local_step = step - start_step
+        current_lr, current_ctx, phase_name = scheduler.step(local_step)
 
         # Update data mixture weights on phase transition
         if phase_name != prev_phase_name:

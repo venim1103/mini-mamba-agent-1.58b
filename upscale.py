@@ -68,8 +68,15 @@ def upscaler(small_ckpt_path, output_ckpt_path):
     big_model.load_state_dict(big_state_dict)
     
     print(f"Saving Upscaled Checkpoint to {output_ckpt_path}...")
-    torch.save({'step': 0, 'model_state_dict': big_state_dict}, output_ckpt_path)
-    print("Done! You can now point train.py to this new checkpoint.")
+    torch.save({
+        'step': 0,
+        'model_state_dict': big_state_dict,
+        'source_checkpoint': small_ckpt_path,
+        'requires_continued_pretraining': True,
+        'recommended_mode': 'upscaled',
+    }, output_ckpt_path)
+    print("Done! Continued pre-training is REQUIRED after upscaling.")
+    print("Run: MODE=upscaled python train.py")
 
 if __name__ == "__main__":
     os.makedirs("checkpoints/upscaled", exist_ok=True)

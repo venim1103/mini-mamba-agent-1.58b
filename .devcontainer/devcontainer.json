@@ -16,6 +16,9 @@
   "mounts": [
     "source=/tmp/devcontainer-certs/ZscalerRootCertificate-2048-SHA256.crt,target=/usr/local/share/ca-certificates/ZscalerRootCertificate-2048-SHA256.crt,type=bind,readonly"
   ],
+  "containerEnv": {
+    "REQUESTS_CA_BUNDLE": "/etc/ssl/certs/ca-certificates.crt"
+  },
   "features": {},
   "customizations": {
     "vscode": {
