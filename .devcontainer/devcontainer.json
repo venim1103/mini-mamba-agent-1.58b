@@ -14,7 +14,9 @@
   ],
   "initializeCommand": "mkdir -p /tmp/devcontainer-certs && (cp /etc/ssl/certs/ZscalerRootCertificate-2048-SHA256.pem /tmp/devcontainer-certs/ZscalerRootCertificate-2048-SHA256.crt 2>/dev/null || touch /tmp/devcontainer-certs/ZscalerRootCertificate-2048-SHA256.crt)",
   "mounts": [
-    "source=/tmp/devcontainer-certs/ZscalerRootCertificate-2048-SHA256.crt,target=/usr/local/share/ca-certificates/ZscalerRootCertificate-2048-SHA256.crt,type=bind,readonly"
+    "source=/tmp/devcontainer-certs/ZscalerRootCertificate-2048-SHA256.crt,target=/usr/local/share/ca-certificates/ZscalerRootCertificate-2048-SHA256.crt,type=bind,readonly",
+    "source=mini-mamba-pip-cache,target=/home/vscode/.cache/pip,type=volume",
+    "source=mini-mamba-conda-pkgs,target=/opt/conda/pkgs,type=volume"
   ],
   "containerEnv": {
     "REQUESTS_CA_BUNDLE": "/etc/ssl/certs/ca-certificates.crt"
@@ -28,7 +30,16 @@
       ],
       "settings": {
         "python.defaultInterpreterPath": "/opt/conda/envs/ai/bin/python",
-        "python.terminal.activateEnvironment": true
+        "python.terminal.activateEnvironment": true,
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "terminal.integrated.profiles.linux": {
+          "bash": {
+            "path": "bash",
+            "args": [
+              "-l"
+            ]
+          }
+        }
       }
     }
   },
