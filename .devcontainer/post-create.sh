@@ -29,7 +29,7 @@ fi
 echo "==> Upgrading pip..."
 $PIP install --upgrade pip
 
-echo "==> Attempting torch install from PyPI index..."
+echo "==> Installing torch/triton (special handling for CUDA builds)..."
 if have_python_pkgs torch triton; then
     echo "==> Torch/triton already present. Skipping torch install."
 else
@@ -51,30 +51,7 @@ else
     fi
 fi
 
-echo "==> Attempting to install additional packages from PyPI index..."
-if have_python_pkgs transformers datasets wandb; then
-    echo "==> transformers/datasets/wandb already present. Skipping install."
-else
-    if $PIP install \
-        transformers \
-        datasets \
-        wandb; then
-        echo "==> Additional packages installed from PyPI index."
-    else
-        echo "==> Additional package install failed. Trying conda-forge fallback..."
-        if $CONDA install -n ai -y -c conda-forge transformers datasets wandb; then
-            echo "==> Additional packages installed from conda-forge."
-        else
-            echo "ERROR: Failed to install transformers/datasets/wandb via both pip and conda."
-            exit 1
-        fi
-    fi
-fi
-
-echo "==> Installing bitsandbytes (G11: 8-bit optimizer states)..."
-$PIP install bitsandbytes 2>/dev/null || echo "  bitsandbytes install failed (optional, will fall back to standard AdamW)"
-
-echo "==> Installing mamba-ssm and causal-conv1d (no build isolation)..."
+echo "==> Installing mamba-ssm and causal-conv1d (special handling required)..."
 # Use --no-build-isolation so these build against the already-installed
 # torch+CUDA version instead of pip pulling the latest (mismatched) torch
 # into an isolated build environment.
@@ -88,6 +65,44 @@ else
         echo "==> mamba-ssm installed successfully."
     else
         echo "==> mamba-ssm install failed."
+    fi
+fi
+
+echo "==> Installing remaining packages from requirements.txt..."
+# Get requirements.txt path - handle both development and deployment contexts
+if [ -f /workspace/requirements.txt ]; then
+    REQ_FILE="/workspace/requirements.txt"
+elif [ -f "$(dirname "$0")/../requirements.txt" ]; then
+    REQ_FILE="$(dirname "$0")/../requirements.txt"
+elif [ -f "$(dirname "$0")/../../requirements.txt" ]; then
+    REQ_FILE="$(dirname "$0")/../../requirements.txt"
+else
+    echo "WARNING: requirements.txt not found, skipping."
+    REQ_FILE=""
+fi
+
+if [ -n "$REQ_FILE" ] && [ -f "$REQ_FILE" ]; then
+    echo "==> Using requirements.txt: $REQ_FILE"
+    # Filter out torch, triton, mamba-ssm, causal-conv1d (already handled above)
+    # and create a temporary requirements file for the rest
+    TEMP_REQ=$(mktemp)
+    grep -vE "^(torch|triton|mamba-ssm|causal-conv1d)" "$REQ_FILE" > "$TEMP_REQ"
+    
+    if $PIP install -r "$TEMP_REQ"; then
+        echo "==> Requirements installed successfully."
+    else
+        echo "==> Some requirements failed, trying conda-forge fallback..."
+        # Try conda-forge for common packages that might fail pip
+        $CONDA install -n ai -y -c conda-forge transformers datasets wandb einops accelerate 2>/dev/null || true
+    fi
+    rm -f "$TEMP_REQ"
+else
+    echo "==> requirements.txt not found, falling back to manual package install..."
+    if $PIP install transformers datasets wandb bitsandbytes einops accelerate; then
+        echo "==> Packages installed from PyPI."
+    else
+        echo "==> Pip install failed, trying conda-forge..."
+        $CONDA install -n ai -y -c conda-forge transformers datasets wandb einops accelerate || true
     fi
 fi
 
