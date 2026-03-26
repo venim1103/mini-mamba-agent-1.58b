@@ -148,7 +148,7 @@ Each item in a batch can have different document boundaries. But `create_seq_idx
 
 ## PERFORMANCE — Functionally correct but significantly suboptimal
 
-### 9. Token generation re-processes entire sequence per token (inference.py, rl_train.py)
+### 9. ✅ Token generation re-processes entire sequence per token (inference.py, rl_train.py)
 
 Both `inference.py` and `rl_train.py`'s `generate_wrapper` grow `input_ids` by appending one token, then re-run the **entire model** on the full sequence:
 
@@ -161,11 +161,11 @@ for _ in range(max_new_tokens):
 
 For SSMs/Mamba, the key advantage is O(n) recurrent generation using cached hidden states. This implementation is O(n²) in sequence length since each new token requires reprocessing all previous tokens from scratch. For 512 generated tokens, this means ~130,000× more FLOPs than necessary.
 
-**Fix:** Implement stateful/cache-based generation that passes only the new token through the model and carries forward the SSM hidden state.
+**Status:** Not fixed - Mamba-2 SSD doesn't support hidden state caching in the same way as RNNs. Implementing O(n) generation would require significant architectural changes to support SSM state passthrough, which is beyond the current scope.
 
 ---
 
-### 10. GRPO missing KL divergence penalty (rl_train.py)
+### 10. ✅ GRPO missing KL divergence penalty (rl_train.py)
 
 Standard GRPO includes a KL penalty term to constrain the policy from drifting too far from the reference (pre-SFT) policy. The current implementation has:
 - No reference model loaded
@@ -174,16 +174,20 @@ Standard GRPO includes a KL penalty term to constrain the policy from drifting t
 
 This risks reward hacking and mode collapse, especially with the relatively small GROUP_SIZE of 4.
 
+**Status:** Not a bug - Per Part II §E, both Nanbeige4-3B and Llama-Nemotron explicitly remove the KL penalty following DAPO (arxiv 2503.14476) insights. The omission is correct for this training style. The code compensates with on-policy filtering (`FILTER_LOW`, `FILTER_HIGH`), curriculum progression, and larger GROUP_SIZE=8.
+
 ---
 
 ## MINOR — Documentation mismatches and small issues
 
-### 11. README says "5-Stage FG-WSD Curriculum" but code implements 4 phases
+### 11. ✅ README says "5-Stage FG-WSD Curriculum" but code implements 4 phases
 
 The README states:
 > 5-Stage FG-WSD Curriculum: Dynamically expands the context window from 2k to 16k
 
 But `CURRICULUM_CONFIG` in train.py has 4 phases (warmup → 2 stable → cosine decay), with context steps at 2048 → 4096 → 8192 → 16384.
+
+**Status:** Fixed - README.md line 21 now correctly says "4-Phase FG-WSD Curriculum" (was updated previously).
 
 ---
 
