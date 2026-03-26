@@ -144,6 +144,8 @@ Each item in a batch can have different document boundaries. But `create_seq_idx
 
 (This is partially blocked by Finding #4 — the DataLoader can't produce batched variable-length cu_seqlens in the first place.)
 
+**Status:** Fixed - Implemented `create_seq_idx_batch()` that handles per-batch-element cu_seqlens with padded variable-length support.
+
 ---
 
 ## PERFORMANCE — Functionally correct but significantly suboptimal
