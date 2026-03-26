@@ -144,11 +144,13 @@ def main():
         for opt in [muon_opt, adam_opt, mamba_core_opt]: scaler.step(opt)
         scaler.update()
         
+        # Fix #7: Count tokens every step, not just every 10 steps
+        tokens_this_step = BATCH_SIZE * GRAD_ACCUM_STEPS * current_ctx
+        total_tokens += tokens_this_step
+        
         if step % 10 == 0:
             t1 = time.time()
             dt, t0 = t1 - t0, t1
-            tokens_this_step = BATCH_SIZE * GRAD_ACCUM_STEPS * current_ctx
-            total_tokens += tokens_this_step 
             print(f"Step {step:06d} | {phase_name:<15} | Loss: {accumulated_loss:.4f} | Tok/s: {tokens_this_step/dt:.0f}")
             wandb.log({"Train/Loss": accumulated_loss, "System/Total_Tokens": total_tokens}, step=step)
 

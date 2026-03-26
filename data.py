@@ -48,15 +48,27 @@ def packed_token_stream(dataset_stream, tokenizer, text_column, max_seq_len):
             cu_seqlens = [0]
             current_len = 0
             
+            # Fix #6: Account for the +1 overlap token when tracking document consumption
+            # The chunk takes max_seq_len + 1 tokens (for overlapping x/y pairs),
+            # but only max_seq_len tokens count toward document boundaries in cu_seqlens.
+            # We consume max_seq_len + 1 from buffer but track only max_seq_len in doc_lengths.
+            
+            # Track document tokens consumed (up to max_seq_len)
+            doc_tokens_consumed = 0
+            
             while len(doc_lengths) > 0 and current_len + doc_lengths[0] <= max_seq_len:
                 current_len += doc_lengths.pop(0)
                 cu_seqlens.append(current_len)
+                doc_tokens_consumed += 1
                 
-            if current_len < max_seq_len:
+            if current_len < max_seq_len and len(doc_lengths) > 0:
+                # Partial document fills the remainder
                 cu_seqlens.append(max_seq_len)
+                # The remaining tokens in this partial document go to the next chunk
                 remainder = max_seq_len - current_len
-                if len(doc_lengths) > 0: doc_lengths[0] -= remainder
+                doc_lengths[0] -= remainder
             
+            # Buffer always advances by max_seq_len + 1 (the chunk size)
             buffer = buffer[max_seq_len + 1:]
             yield (
                 torch.tensor(chunk[:-1], dtype=torch.long), 

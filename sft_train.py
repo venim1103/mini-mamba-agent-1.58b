@@ -70,6 +70,8 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
             
             if (batch_idx + 1) % GRAD_ACCUM_STEPS == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                # Fix #14: Call scheduler.step() before get_last_lr() to avoid warning
+                scheduler.step()
                 # Sync LRs across optimizer groups
                 current_lr = scheduler.get_last_lr()[0]
                 for opt in [muon_opt, adam_opt]:
@@ -77,7 +79,6 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
                 for group in mamba_opt.param_groups: group['lr'] = current_lr * 0.1
                 
                 for opt in [muon_opt, adam_opt, mamba_opt]: opt.step()
-                scheduler.step()
                 for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
                 
                 if global_step % 10 == 0:
