@@ -78,7 +78,7 @@ PyTorch's default `collate_fn` in the DataLoader tries to `torch.stack()` all `c
 
 ---
 
-### 5. `upscale.py` — Norm check catches layer-internal norms, causing KeyError (upscale.py, Lines 33–35)
+### 5. ✅ `upscale.py` — Norm check catches layer-internal norms, causing KeyError (upscale.py, Lines 33–35)
 
 ```python
 if "tok_embeddings" in key or "norm" in key or "output" in key:
@@ -195,7 +195,7 @@ The `#!/bin/bash` shebang appears on line 15, after the license comment block. T
 
 ---
 
-### 13. `generate_wrapper` ignores `do_sample` parameter (rl_train.py)
+### 13. ✅ `generate_wrapper` ignores `do_sample` parameter (rl_train.py)
 
 The function accepts `do_sample` but always uses `torch.multinomial` (sampling). When `do_sample=False`, it should fall back to greedy decoding (`argmax`).
 
