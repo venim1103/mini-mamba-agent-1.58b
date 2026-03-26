@@ -96,6 +96,61 @@ class RMSNorm(nn.Module):
         norm_x = torch.mean(x ** 2, dim=-1, keepdim=True)
         return self.weight * (x * torch.rsqrt(norm_x + self.eps))
 
+
+class AttentionBlock(nn.Module):
+    """Lightweight attention block with GQA (4 KV heads) for hybrid architecture.
+    
+    As recommended in Nemotron-H §2.1, a small percentage of attention layers
+    (evenly dispersed) alongside Mamba-2 layers improves retrieval-heavy tasks.
+    """
+    
+    def __init__(self, dim, n_kv_heads=4):
+        super().__init__()
+        self.dim = dim
+        self.n_heads = dim // 64  # head_dim = 64
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = dim // self.n_heads
+        
+        # GQA: fewer KV heads than Q heads
+        self.q_proj = BitLinear(dim, dim)
+        self.k_proj = BitLinear(dim, self.n_kv_heads * self.head_dim)
+        self.v_proj = BitLinear(dim, self.n_kv_heads * self.head_dim)
+        self.o_proj = BitLinear(dim, dim)
+        
+        self.norm = RMSNorm(dim)
+        
+    def forward(self, hidden_states, seq_idx=None):
+        x = self.norm(hidden_states)
+        
+        # Project to Q, K, V
+        q = self.q_proj(x).view(x.shape[0], x.shape[1], self.n_heads, self.head_dim)
+        k = self.k_proj(x).view(x.shape[0], x.shape[1], self.n_kv_heads, self.head_dim)
+        v = self.v_proj(x).view(x.shape[0], x.shape[1], self.n_kv_heads, self.head_dim)
+        
+        # Expand K, V to all heads (GQA)
+        if self.n_kv_heads < self.n_heads:
+            repeat_factor = self.n_heads // self.n_kv_heads
+            k = k.repeat_interleave(repeat_factor, dim=2)
+            v = v.repeat_interleave(repeat_factor, dim=2)
+        
+        # Simple causal attention (no flash attention for compatibility)
+        # Scale
+        q = q * (self.head_dim ** -0.5)
+        
+        # Attention scores
+        attn = torch.einsum("bqhd,bkhd->bhqk", q, k)
+        
+        # Causal mask
+        seqlen = x.shape[1]
+        mask = torch.triu(torch.ones(seqlen, seqlen, device=x.device, dtype=torch.bool), diagonal=1)
+        attn = attn.masked_fill(mask, float('-inf'))
+        
+        attn = F.softmax(attn, dim=-1)
+        out = torch.einsum("bhqk,bkhd->bqhd", attn, v)
+        out = out.contiguous().view(x.shape[0], x.shape[1], self.dim)
+        
+        return hidden_states + self.o_proj(out)
+
 # ==========================================
 # 2. BitMamba Block & Architecture
 # ==========================================
@@ -216,18 +271,34 @@ class BitMambaBlock(nn.Module):
 
 class BitMambaLLM(nn.Module):
     def __init__(self, vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2,
-                 headdim=64, ngroups=1, chunk_size=256, use_checkpoint=False):
+                 headdim=64, ngroups=1, chunk_size=256, use_checkpoint=False,
+                 use_attn=False, attn_pct=0.08):
         super().__init__()
         self.vocab_size = vocab_size
         self.use_checkpoint = use_checkpoint
+        self.use_attn = use_attn
+        self.attn_pct = attn_pct
+        
+        # Compute attention layer indices (evenly dispersed as in Nemotron-H)
+        if use_attn and attn_pct > 0:
+            n_attn = max(1, int(n_layers * attn_pct))
+            step = n_layers // n_attn
+            self.attn_indices = set(range(step // 2, n_layers, step))
+        else:
+            self.attn_indices = set()
+        
         self.tok_embeddings = nn.Embedding(vocab_size, dim)
         
         self.layers = nn.ModuleList()
-        for _ in range(n_layers):
-            self.layers.append(BitMambaBlock(
-                dim, d_state=d_state, expand=expand,
-                headdim=headdim, ngroups=ngroups, chunk_size=chunk_size,
-            ))
+        for i in range(n_layers):
+            if i in self.attn_indices:
+                # Lightweight attention layer (GQA with 4 KV heads)
+                self.layers.append(AttentionBlock(dim, n_kv_heads=4))
+            else:
+                self.layers.append(BitMambaBlock(
+                    dim, d_state=d_state, expand=expand,
+                    headdim=headdim, ngroups=ngroups, chunk_size=chunk_size,
+                ))
             
         self.norm = RMSNorm(dim)
         self.output = BitLinear(dim, vocab_size)
