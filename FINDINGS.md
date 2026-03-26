@@ -103,7 +103,7 @@ elif "layers." in key:
 
 ## BUGS — Incorrect behavior that doesn't crash
 
-### 6. Off-by-one in `packed_token_stream` document boundary tracking (data.py, Lines 47–67)
+### 6. ✅ Off-by-one in `packed_token_stream` document boundary tracking (data.py, Lines 47–67)
 
 The chunk consumes `max_seq_len + 1` tokens from the buffer (to create overlapping x/y pairs), but the `doc_lengths` bookkeeping only accounts for `max_seq_len` tokens. The extra token eaten per chunk causes `doc_lengths` to slowly **drift out of sync** with the actual buffer contents.
 
@@ -118,7 +118,7 @@ Over many chunks, document boundaries in `cu_seqlens` become progressively incor
 
 ---
 
-### 7. `total_tokens` counter only updated every 10 steps (train.py, Lines 96–101)
+### 7. ✅ `total_tokens` counter only updated every 10 steps (train.py, Lines 96–101)
 
 ```python
 if step % 10 == 0:
@@ -187,7 +187,7 @@ But `CURRICULUM_CONFIG` in train.py has 4 phases (warmup → 2 stable → cosine
 
 ---
 
-### 12. Shell script shebang after license header (wsl_podman_setup.sh)
+### 12. ✅ Shell script shebang after license header (wsl_podman_setup.sh)
 
 The `#!/bin/bash` shebang appears on line 15, after the license comment block. The OS requires the shebang on **line 1** to identify the interpreter. As written, `./wsl_podman_setup.sh` may fail to run or use the wrong shell.
 
@@ -201,7 +201,7 @@ The function accepts `do_sample` but always uses `torch.multinomial` (sampling).
 
 ---
 
-### 14. `scheduler.get_last_lr()` called before first `scheduler.step()` (sft_train.py)
+### 14. ✅ `scheduler.get_last_lr()` called before first `scheduler.step()` (sft_train.py)
 
 On the first gradient accumulation boundary, `scheduler.get_last_lr()` is called before `scheduler.step()` has ever been invoked. PyTorch emits a UserWarning for this.
 
@@ -209,13 +209,13 @@ On the first gradient accumulation boundary, `scheduler.get_last_lr()` is called
 
 ---
 
-### 15. No `requirements.txt` or `pyproject.toml`
+### 15. ✅ No `requirements.txt` or `pyproject.toml`
 
 The README lists dependencies manually (`pip install torch transformers datasets wandb triton ...`) but there is no lockfile or requirements file for reproducible installs. This makes it easy to get version mismatches (especially critical for `mamba-ssm` and `causal-conv1d`).
 
 ---
 
-### 16. Shell script has no error handling or privilege checks (wsl_podman_setup.sh)
+### 16. ✅ Shell script has no error handling or privilege checks (wsl_podman_setup.sh)
 
 The script runs `apt install`, writes to `/etc/`, and copies system files without:
 - Checking for root/sudo privileges
