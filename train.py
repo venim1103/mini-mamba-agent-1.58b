@@ -42,12 +42,38 @@ SAVE_EVERY = 5000
 AMP_DTYPE = torch.float16
 CHECKPOINT_DIR = f"checkpoints/bitmamba_{MODE}"
 
-TRAIN_CONFIG = [
-    {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.35},
-    {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.30},
-    {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "weight": 0.20},
-    {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.15}
-]
+# FG-WSD: Data quality progression per phase (Nanbeige4-3B §2.2.2)
+# Keep LR flat while progressively increasing data quality
+# Warmup: Mixed | Stable 1: Web-heavy | Stable 2: Code/Logic-heavy | Decay: HQ reasoning only
+TRAIN_CONFIGS = {
+    "Phase_1": [  # Warmup - diverse mixed data
+        {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.25},
+        {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.25},
+        {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "weight": 0.30},
+        {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.20}
+    ],
+    "Phase_2": [  # Stable 1 - heavy on web/diversity
+        {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.20},
+        {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.20},
+        {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "weight": 0.45},
+        {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.15}
+    ],
+    "Phase_3": [  # Stable 2 - heavy on code/logic (high quality)
+        {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.40},
+        {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.35},
+        {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "weight": 0.15},
+        {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.10}
+    ],
+    "Phase_4": [  # Decay - 100% high-quality reasoning/synthetic
+        {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.50},
+        {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.40},
+        {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "weight": 0.05},
+        {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.05}
+    ],
+}
+
+# Legacy single config (used for backward compatibility if needed)
+TRAIN_CONFIG = TRAIN_CONFIGS["Phase_2"]
 
 # UPDATED: Fixed context at 8192 for first 80% (stable phases), only expand to 16384 in decay
 # Per Nanbeige4-3B and Nemotron-H: expanding context during stable training ruins dynamics
@@ -98,28 +124,42 @@ def main():
     muon_opt, adam_opt, mamba_core_opt = setup_mamba_optimizers(model, CURRICULUM_CONFIG)
     scheduler = FGWSD_Scheduler(muon_opt, adam_opt, mamba_core_opt, TOTAL_STEPS, CURRICULUM_CONFIG)
     
+    # Start with Phase_1 (warmup) data config for FG-WSD
     train_loader, tokenizer = create_dataloaders(
-        TRAIN_CONFIG, tokenizer_path="custom_agentic_tokenizer", 
-        max_seq_len=16384, batch_size=BATCH_SIZE  # Initial max for decay phase, will recreate for earlier phases
+        TRAIN_CONFIGS["Phase_1"], tokenizer_path="custom_agentic_tokenizer", 
+        max_seq_len=16384, batch_size=BATCH_SIZE
     )
     model.train()
     data_iter = iter(train_loader)
     total_tokens, t0 = 0, time.time()
     previous_ctx = 16384  # G9: track previous ctx to detect changes
+    previous_phase = "Phase_1"  # Track phase changes for FG-WSD data quality progression
     # G10: GradScaler for FP16 (no-op when using BF16)
     scaler = torch.amp.GradScaler(enabled=(AMP_DTYPE == torch.float16))
     
     for step in range(TOTAL_STEPS):
         current_lr, current_ctx, phase_name = scheduler.step(step)
         
+        # FG-WSD: Recreate DataLoader when phase changes (data quality progression)
+        if phase_name != previous_phase and phase_name != "Complete" and previous_phase is not None:
+            train_loader, _ = create_dataloaders(
+                TRAIN_CONFIGS[phase_name], tokenizer_path="custom_agentic_tokenizer",
+                max_seq_len=current_ctx, batch_size=BATCH_SIZE
+            )
+            data_iter = iter(train_loader)
+            print(f"  [FG-WSD] Phase changed to {phase_name}: data quality updated")
+            wandb.log({"System/FG_WSD_Phase": phase_name}, step=step)
+        
         # G9: Recreate DataLoader when context window changes to avoid transfer waste
         if current_ctx != previous_ctx:
             train_loader, _ = create_dataloaders(
-                TRAIN_CONFIG, tokenizer_path="custom_agentic_tokenizer",
+                TRAIN_CONFIGS.get(phase_name, TRAIN_CONFIG), tokenizer_path="custom_agentic_tokenizer",
                 max_seq_len=current_ctx, batch_size=BATCH_SIZE
             )
             data_iter = iter(train_loader)
             previous_ctx = current_ctx
+        
+        previous_phase = phase_name
         
         for opt in [muon_opt, adam_opt, mamba_core_opt]: opt.zero_grad()
         accumulated_loss = 0.0
