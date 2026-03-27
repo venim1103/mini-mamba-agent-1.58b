@@ -1,24 +1,25 @@
 # Mini Mamba Agent 1.58b
 
-This repository contains a PyTorch pipeline for training a BitMamba Small Language Model (SLM) optimized for reasoning, logic, and tool-use, all constrained to fit on a single 24GB consumer GPU (RTX 3090).
+This repository contains a PyTorch pipeline for training a BitMamba Small Language Model (SLM) optimized for reasoning, logic, and tool-use, all constrained to fit on a single 12GB–24GB consumer GPU (e.g., RTX 3060 to RTX 3090/4090).
 
 Rather than relying on quadratic Self-Attention, which limits context windows and crushes consumer hardware, this architecture merges the linear-time sequence modeling of the Mamba-2 architecture with the extreme parameter efficiency of the BitNet b1.58 paradigm.
 
 **🧠 Architectural Highlights & Hardware Optimizations**
 
-State Space Models are notoriously sensitive to numerical perturbations. A naive application of 1.58-bit ternary quantization directly to the state transition matrices causes the model to suffer from "amnesia". To solve this, our architecture utilizes a Hybrid Precision Allocation strategy:
- * Triton-Accelerated Ternary Projections: The massive, dense linear projection matrices (in_proj, out_proj, x_proj) dominate the layer's memory footprint. These are quantized to strictly \{-1, 0, 1\} using a custom Triton Kernel that fuses the Straight-Through Estimator (STE) directly into the forward pass, eliminating VRAM fragmentation.
+State Space Models are notoriously sensitive to numerical perturbations. A naive application of 1.58-bit ternary quantization directly to the state transition matrices causes the model to suffer from "amnesia". To solve this, our architecture utilizes a Hybrid Precision Allocation strategy alongside extreme consumer-GPU memory optimizations:
+ * Triton-Accelerated Ternary Projections: The massive, dense linear projection matrices (in_proj, out_proj, x_proj) dominate the layer's memory footprint. These are completely untied from the FP32 embeddings and quantized to strictly `{-1, 0, 1}` using a custom Triton Kernel that fuses the Straight-Through Estimator (STE) directly into the forward pass.
  * High-Precision Recurrent Core: The highly sensitive state transition matrix (A) operates exponentially over time and must remain continuous. We strictly isolate the A matrix, the discrete step size (δ), and the input/output state mappings (B, C) in FP16/FP32 precision.
- * Linear Context Scaling (16k+): By using Tri Dao's `mamba_chunk_scan_combined` for the Mamba-2 SSD core alongside our ternary projections, we scale the context window to 16,384 tokens with flat VRAM usage, allowing the agent to execute 50+ step tool-use trajectories.
+ * Chunked Cross-Entropy & Dynamic Padding: Eliminates the massive `[BS, seq_len, vocab_size]` logits memory bomb. Gradients are computed in chunks with dynamic `valid_tokens` calculation to prevent SFT padding dilution, while custom collators ensure batches are only padded to the longest sequence in that specific batch.
+ * Linear Context Scaling (16k+): By using Tri Dao's `mamba_chunk_scan_combined` for the native Mamba-2 SSD core alongside our ternary projections, we scale the context window to 16,384 tokens with flat VRAM usage.
  * Hybrid Mamba-Attention (Nemotron-H §2.1): ~8% of layers are lightweight Grouped-Query Attention blocks (GQA with 4 KV-heads) dispersed evenly among Mamba-2 blocks. This closes the retrieval gap for tool-name/parameter recall from system prompts while preserving the linear-context advantage.
- * State Bleed Prevention: Our 0% padding dataloader uses a custom seq_idx tensor passed directly to the Mamba core to flush the recurrent state at document boundaries, preventing logic contamination.
+ * Ampere/Ada Optimized: Fully integrates `torch.compile(mode="reduce-overhead")` and FP16 `GradScaler` to double throughput on RTX 3090 architectures.
 
 **🚀 The 3-Phase Training Engine**
 
 *Phase 1: Pre-Training (The Logic Core)*
 
- * Isolated Multi-Optimizer Routing: 2D ternary weight matrices are routed to the Muon optimizer. The continuous State Space parameters (A, δ) are routed to a dedicated AdamW optimizer with a strictly lower, fixed learning rate (10x smaller) and zero weight decay to prevent the recurrent core from destabilizing during Quantization-Aware Training.
- * 4-Phase FG-WSD Curriculum: Implements progressive data quality refinement across phases (Nanbeige4-3B §2.2.2) — early phases mix high-quality (logic, code, tools) and medium-quality (web), while later phases train exclusively on HQ sources. Context is fixed in warmup/stable phases (Scout: 4k, Parent/Upscaled: 8k) and expands to 16k only in decay.
+ * Isolated Multi-Optimizer Routing: 2D ternary weight matrices are routed to the Muon optimizer. The continuous State Space parameters (A, δ) are routed to a dedicated AdamW optimizer with a strictly lower, fixed learning rate (10x smaller).
+ * True 4-Phase FG-WSD Curriculum: Implements progressive data quality refinement (Nanbeige4-3B §2.2.2). The learning rate is held flat while the dataset mixture dynamically shifts from web-heavy (Phase 1) to distilled synthetic reasoning (Phase 4). Context is strictly fixed at 8k to stabilize training dynamics, expanding to 16k only in the final decay phase.
 
 *Phase 2: Supervised Fine-Tuning (3-Stage Pipeline)*
 
@@ -27,10 +28,10 @@ State Space Models are notoriously sensitive to numerical perturbations. A naive
  * **Stage 3 — Polish:** Tool-calling and function-use focused fine-tuning with structured output training.
 
 *Phase 3: Cascaded Reinforcement Learning (Concise GRPO)*
- * VRAM-Free RL: Utilizes Group Relative Policy Optimization (GRPO) directly on the Actor with GROUP_SIZE=8, avoiding a separate Critic model.
- * On-Policy Difficulty Filtering: Before each training batch, a pre-pass estimates per-problem pass rates and retains only problems in the 10%–90% range (Nanbeige4-3B §3.4), ensuring the model trains on problems that are neither trivially solved nor impossible.
- * Easy→Hard Curriculum: Filtered problems are sorted by pass rate (easiest first) to stabilize early training before ramping difficulty.
- * Separated Rewards: Format rewards (tag structure), accuracy rewards (correct answer), and conciseness penalties (thought-to-answer ratio > 10:1) are computed independently for fine-grained logging and weighting.
+ * VRAM-Free RL: Paging optimizer states to the CPU during autoregressive generation (`torch.cuda.empty_cache()`) frees up the exact VRAM needed to run Group Relative Policy Optimization (GRPO) directly on the Actor with `GROUP_SIZE=8`, avoiding a separate Critic model.
+ * DAPO-Style PPO Clipping: Omits the heavy KL-divergence penalty in favor of PPO epsilon clipping (`clamp(ratio, 1-EPS, 1+EPS)`), preventing weight destruction on high-advantage batches.
+ * On-Policy Difficulty Filtering: Before each training batch, a pre-pass estimates per-problem pass rates and retains only problems in the 10%–90% range, sorting them into an Easy→Hard curriculum.
+ * Separated Rewards: Format rewards (tag structure), accuracy rewards, and conciseness penalties (thought-to-answer ratio > 10:1) are computed independently.
 
 ## 📈 The Model Family Workflow
 | Model Tier | Parameters | Layers | Dim | Steps | Purpose |
@@ -41,7 +42,7 @@ State Space Models are notoriously sensitive to numerical perturbations. A naive
 
 ## 📂 Project & Data Structure
 
-Place your downloaded datasets into the local_data folder exactly as mapped below:
+Place your downloaded datasets into the `local_data` folder exactly as mapped below:
 
 ```
 local_data/
@@ -120,18 +121,18 @@ huggingface-cli download nvidia/OpenMathReasoning --local-dir local_data/rl/reas
 
 ### (0. Optional Development Environment)
 This repository includes devcontainer scripts for running the container inside Podman on VSCode.
-To get Podman working with VSCode devcontainers you have to add this line to your User's settings.json :
-```
+To get Podman working with VSCode devcontainers you have to add this line to your User's `settings.json`:
+```json
 "dev.container.dockerPath":"podman"
 ```
 
-For Windows users who utilize WSL, to get GPU passtrough to work inside Podman running on WSL Ubuntu host image, this repository includes a helper setup script to get things set up.
+For Windows users who utilize WSL, to get GPU passthrough to work inside Podman running on a WSL Ubuntu host image, this repository includes a helper setup script to get things set up.
 
 
 ### 1. Installation
 
 Clone the repository and install the strict dependencies (including Triton and Mamba-SSM):
-```
+```bash
 pip install torch transformers datasets wandb triton
 pip install causal-conv1d>=1.4.0
 pip install mamba-ssm
@@ -139,7 +140,7 @@ pip install mamba-ssm
 
 ### 2. Build the Custom Tokenizer
 
-Generate the 64k mathematical vocabulary strictly from your local train/ data:
+Generate the 64k mathematical vocabulary strictly from your local `train/` data:
 
 ```bash
 python train_tokenizer.py
@@ -147,7 +148,7 @@ python train_tokenizer.py
 
 ### 3. Launch Phase 1 (Pre-Training)
 
-Log in to Weights & Biases (wandb login), then choose a mode via env var (`scout`, `parent`, `upscaled`):
+Log in to Weights & Biases (`wandb login`), then choose a mode via env var (`scout`, `parent`, `upscaled`):
 
 ```bash
 MODE=scout python train.py
@@ -171,7 +172,7 @@ python rl_train.py
 
 ### 5. (Optional) Synthetic Data Augmentation
 
-Generate additional training data from your existing corpus using the trained model:
+Generate additional training data from your existing corpus using the trained model. This is strictly required before entering Phase 3/4 of the Fine-Grained WSD pre-training curriculum:
 
 ```bash
 # Generate QA pairs from web data
@@ -190,4 +191,3 @@ Available strategies: `diverse_qa`, `distill`, `extract`, `knowledge`, `rephrase
 This project's source code is licensed under the **Apache License 2.0**. See the `LICENSE` file for full details. 
 
 *(Note: Pre-trained model weights, once released, may be subject to a separate commercial-use license).*
-
