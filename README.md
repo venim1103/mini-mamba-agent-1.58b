@@ -98,23 +98,30 @@ Download each dataset from its HF Hub ID and place the files in the correspondin
 ### Download Commands
 
 ```bash
+# Optional: authenticate for higher rate limits
+hf auth login
+
 # Pre-training
-huggingface-cli download AI-MO/NuminaMath-CoT --local-dir local_data/train/logic/numinamath-cot
-huggingface-cli download hitachi-nlp/FLDx2 --local-dir local_data/train/logic/fldx2
-huggingface-cli download nampdn-ai/tiny-codes --local-dir local_data/train/code/tiny-codes
-huggingface-cli download HuggingFaceFW/fineweb-edu --local-dir local_data/train/web/fineweb-edu --include "sample/10BT/*"
-huggingface-cli download dmayhem93/toolformer-v0-postprocessed --local-dir local_data/train/tools/toolformer
+hf download AI-MO/NuminaMath-CoT --repo-type dataset --local-dir local_data/train/logic/numinamath-cot
+hf download hitachi-nlp/FLDx2 --repo-type dataset --local-dir local_data/train/logic/fldx2
+hf download nampdn-ai/tiny-codes --repo-type dataset --local-dir local_data/train/code/tiny-codes
+hf download HuggingFaceFW/fineweb-edu --repo-type dataset --local-dir local_data/train/web/fineweb-edu --include "sample/10BT/*"
+hf download dmayhem93/toolformer-v0-postprocessed --repo-type dataset --local-dir local_data/train/tools/toolformer
 
 # SFT
-huggingface-cli download nvidia/OpenMathReasoning --local-dir local_data/sft/reasoning/open-math-reasoning
-huggingface-cli download nvidia/Llama-Nemotron-Post-Training-Dataset --local-dir local_data/sft/reasoning/nemotron-post-training --include "SFT/code/*" --include "SFT/science/*"
-huggingface-cli download open-r1/OpenR1-Math-220k --local-dir local_data/sft/reasoning/openr1-math --include "default/*"
-huggingface-cli download HuggingFaceTB/smol-smoltalk --local-dir local_data/sft/mixed/smol-smoltalk
-huggingface-cli download argilla/apigen-function-calling --local-dir local_data/sft/tool_calling/apigen-fc
-huggingface-cli download MadeAgents/xlam-irrelevance-7.5k --local-dir local_data/sft/tool_calling/xlam-irrelevance
+hf download nvidia/OpenMathReasoning --repo-type dataset --local-dir local_data/sft/reasoning/open-math-reasoning
+hf download nvidia/Llama-Nemotron-Post-Training-Dataset --repo-type dataset --local-dir local_data/sft/reasoning/nemotron-post-training --include "SFT/code/*" --include "SFT/science/*"
+hf download open-r1/OpenR1-Math-220k --repo-type dataset --local-dir local_data/sft/reasoning/openr1-math --include "default/*"
+hf download HuggingFaceTB/smol-smoltalk --repo-type dataset --local-dir local_data/sft/mixed/smol-smoltalk
+hf download argilla/apigen-function-calling --repo-type dataset --local-dir local_data/sft/tool_calling/apigen-fc
+hf download MadeAgents/xlam-irrelevance-7.5k --repo-type dataset --local-dir local_data/sft/tool_calling/xlam-irrelevance
 
-# RL (symlink to SFT copy, or download separately)
-huggingface-cli download nvidia/OpenMathReasoning --local-dir local_data/rl/reasoning/open-math-reasoning
+# RL (prefer symlink to SFT copy)
+mkdir -p local_data/rl/reasoning
+ln -sfn ../../sft/reasoning/open-math-reasoning local_data/rl/reasoning/open-math-reasoning
+
+# RL (or download separately)
+hf download nvidia/OpenMathReasoning --repo-type dataset --local-dir local_data/rl/reasoning/open-math-reasoning
 ```
 
 ## 🛠️ Getting Started
