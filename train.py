@@ -45,6 +45,14 @@ CHECKPOINT_DIR = f"checkpoints/bitmamba_{MODE}"
 # FG-WSD: Data quality progression per phase (Nanbeige4-3B §2.2.2)
 # Keep LR flat while progressively increasing data quality
 # Warmup: Mixed | Stable 1: Web-heavy | Stable 2: Code/Logic-heavy | Decay: HQ reasoning only
+# Synthetic data integrated in Stable 2 and Decay (Nemotron-H §2.3, Nanbeige4-3B §2.2)
+#
+# PRE-TRAINING: Generate synthetic data first using synth_data.py:
+#   python synth_data.py --strategy diverse_qa --input local_data/train/web --output local_data/synth/web_qa
+#   python synth_data.py --strategy distill --input local_data/train/code --output local_data/synth/code_distill
+#   python synth_data.py --strategy extract --input local_data/train/web --output local_data/synth/knowledge_extract
+#   python synth_data.py --strategy rephrase --input local_data/train/web --output local_data/synth/web_rephrased
+#
 TRAIN_CONFIGS = {
     "Phase_1": [  # Warmup - diverse mixed data
         {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.25},
@@ -58,17 +66,21 @@ TRAIN_CONFIGS = {
         {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "weight": 0.45},
         {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.15}
     ],
-    "Phase_3": [  # Stable 2 - heavy on code/logic (high quality)
-        {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.40},
-        {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.35},
-        {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "weight": 0.15},
-        {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.10}
-    ],
-    "Phase_4": [  # Decay - 100% high-quality reasoning/synthetic
-        {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.50},
-        {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.40},
+    "Phase_3": [  # Stable 2 - heavy on code/logic + synthetic CoT (Nanbeige4-3B)
+        {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.30},
+        {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.25},
+        {"name": "synth_qa",     "path": "local_data/synth/web_qa", "format": "json",    "weight": 0.20},
+        {"name": "synth_distill","path": "local_data/synth/code_distill","format": "json","weight": 0.15},
         {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "weight": 0.05},
         {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.05}
+    ],
+    "Phase_4": [  # Decay - 100% high-quality reasoning/synthetic (Nemotron-H)
+        {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.25},
+        {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.20},
+        {"name": "synth_qa",     "path": "local_data/synth/web_qa", "format": "json",    "weight": 0.20},
+        {"name": "synth_distill","path": "local_data/synth/code_distill","format": "json","weight": 0.15},
+        {"name": "synth_extract","path": "local_data/synth/knowledge_extract","format": "json","weight": 0.10},
+        {"name": "synth_rephrase","path": "local_data/synth/web_rephrased","format": "json","weight": 0.10}
     ],
 }
 
