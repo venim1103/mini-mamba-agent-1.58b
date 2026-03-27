@@ -180,6 +180,123 @@ This risks reward hacking and mode collapse, especially with the relatively smal
 
 ---
 
+## BUGS — Incorrect behavior that doesn't crash
+
+### 17. ✅ RL Logits Memory Bomb — Full sequence projected through vocab head (rl_train.py, Lines 228–236)
+
+During GRPO policy gradient, the code does:
+```python
+full_seq = torch.cat([input_ids[0], comp_ids]).unsqueeze(0)
+logits = model(full_seq, seq_idx=None)
+log_probs = -F.cross_entropy(logits[0, input_ids.shape[1]-1 : -1, :].contiguous(), ...)
+```
+
+**The Issue:** `full_seq` contains both the prompt (thousands of tokens) and completion. `model(full_seq)` projects the *entire sequence* through the 64,000-vocabulary output head. The logits for prompt tokens are immediately discarded — only logits for `comp_ids` are used.
+
+This wastes GBs of VRAM during RL training.
+
+**The Fix:** Use `forward_hidden` to get hidden states, slice only the completion portion, and project only that:
+```python
+hidden = model.forward_hidden(full_seq, seq_idx=None)
+hidden_slice = hidden[0:1, input_ids.shape[1]-1 : -1, :]  # only completion tokens
+logits = model.output(hidden_slice)  # projects only completion tokens to vocab
+```
+
+---
+
+### 18. ✅ SFT Missing Chunked Cross-Entropy (sft_train.py, Lines 62–67)
+
+Pre-training (`train.py`) correctly uses `chunked_cross_entropy` to avoid materializing the full logits tensor. However, `sft_train.py` still materializes full logits:
+```python
+logits = model(x, seq_idx=None) 
+loss = F.cross_entropy(
+    logits[..., :-1, :].contiguous().view(-1, logits.size(-1)),
+    y[..., 1:].contiguous().view(-1),
+    ignore_index=-100,
+)
+```
+
+**The Issue:** With context length 4096 and BS=2, materializing full logits takes ~2GB of VRAM that could easily be saved.
+
+**The Fix:** Use `forward_hidden` + `chunked_cross_entropy` in sft_train.py:
+```python
+hidden = model.forward_hidden(x, seq_idx=None)
+loss = chunked_cross_entropy(hidden, model.output, y[..., 1:], ignore_index=-100) / GRAD_ACCUM_STEPS
+```
+
+**Note:** The `chunked_cross_entropy` function needs to be updated to accept an `ignore_index` parameter.
+
+---
+
+### 19. ✅ Tied-Weight Asymmetry with BitLinear (model.py, Line 306)
+
+From Part I Finding #15 (Weight Tying Interaction with BitLinear):
+```python
+self.output = BitLinear(dim, vocab_size)
+self.output.weight = self.tok_embeddings.weight  # weight tying
+```
+
+**The Issue:** `tok_embeddings.weight` is a standard FP32 parameter. When doing the forward pass lookup `self.tok_embeddings(input_ids)`, it uses full precision. However, when the output head runs, `BitLinear` quantizes those *same* weights to {-1, 0, 1} via the STE.
+
+The gradients flowing back from the cross-entropy loss treat the weights as ternary (via the STE quantizer), but the gradients flowing back from the input embedding treat them as continuous. They will "fight" each other during optimizer updates.
+
+**The Fix:** At the 500M parameter scale, untying the weights to avoid optimization instability:
+```python
+self.output = BitLinear(dim, vocab_size, bias=False)
+# Remove: self.output.weight = self.tok_embeddings.weight
+```
+
+---
+
+### 20. ✅ RL Optimizer State CPU Offloading Missing Cache Clear (rl_train.py, Lines 197–202)
+
+The code correctly offloads optimizer states to CPU during generation:
+```python
+for opt in [muon_opt, adam_opt, mamba_opt]:
+    for state in opt.state.values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor): state[k] = v.cpu()
+# ... generation ...
+# Restore:
+for opt in [muon_opt, adam_opt, mamba_opt]:
+    for state in opt.state.values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor): state[k] = v.cuda()
+```
+
+**The Issue:** Moving tensors between devices inside dictionaries does not always free the original GPU memory immediately due to PyTorch's caching allocator, and repeatedly doing this every batch causes fragmentation. The generation phase may not actually use the freed VRAM because the allocator hasn't released the blocks.
+
+**The Fix:** Call `torch.cuda.empty_cache()` immediately after moving the states to the CPU, right before `model.generate()`:
+```python
+for opt in [muon_opt, adam_opt, mamba_opt]:
+    for state in opt.state.values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor): state[k] = v.cpu()
+torch.cuda.empty_cache()  # Force release of freed GPU blocks
+# ... generation ...
+```
+
+---
+
+### 21. ✅ chunked_cross_entropy Missing ignore_index Parameter (model.py, Line 331)
+
+The `chunked_cross_entropy` function is used for pre-training where there's no padding token, but SFT requires `ignore_index=-100` for proper label padding handling.
+
+**The Fix:** Update `chunked_cross_entropy` to accept and pass through `ignore_index`:
+```python
+def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024, ignore_index=-100):
+    ...
+    total_loss += F.cross_entropy(
+        chunk_logits.reshape(-1, chunk_logits.size(-1)),
+        chunk_targets,
+        reduction='sum',
+        ignore_index=ignore_index,  # Add this
+    )
+```
+
+
+---
+
 ## MINOR — Documentation mismatches and small issues
 
 ### 11. ✅ README says "5-Stage FG-WSD Curriculum" but code implements 4 phases
