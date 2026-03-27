@@ -60,7 +60,7 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
             x, y = x.to(DEVICE), y.to(DEVICE)
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 hidden = model.forward_hidden(x, seq_idx=None)
-                loss = chunked_cross_entropy(hidden, model.output, y[..., 1:], ignore_index=-100) / GRAD_ACCUM_STEPS
+                loss = chunked_cross_entropy(hidden[:, :-1, :], model.output, y[..., 1:], ignore_index=-100) / GRAD_ACCUM_STEPS
             loss.backward()
             accumulated_loss += loss.item()
             
