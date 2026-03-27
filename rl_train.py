@@ -199,6 +199,7 @@ def main():
                 for state in opt.state.values():
                     for k, v in state.items():
                         if isinstance(v, torch.Tensor): state[k] = v.cpu()
+            torch.cuda.empty_cache()  # Force release of freed GPU blocks
             
             # Generate GROUP_SIZE completions
             model.eval()
@@ -229,9 +230,11 @@ def main():
                 comp_ids = completions_ids[i].to(DEVICE)
                 full_seq = torch.cat([input_ids[0], comp_ids]).unsqueeze(0)
                 with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                    logits = model(full_seq, seq_idx=None)
+                    hidden = model.forward_hidden(full_seq, seq_idx=None)
+                    hidden_slice = hidden[0:1, input_ids.shape[1]-1:-1, :]
+                    logits = model.output(hidden_slice)
                     log_probs = -F.cross_entropy(
-                        logits[0, input_ids.shape[1]-1 : -1, :].contiguous(),
+                        logits[0, :, :].contiguous(),
                         comp_ids.contiguous(), reduction='none'
                     )
                     loss = -(log_probs * advantages[i]).mean() / GROUP_SIZE

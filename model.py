@@ -302,8 +302,7 @@ class BitMambaLLM(nn.Module):
                 ))
             
         self.norm = RMSNorm(dim)
-        self.output = BitLinear(dim, vocab_size)
-        self.output.weight = self.tok_embeddings.weight 
+        self.output = BitLinear(dim, vocab_size, bias=False)
 
     def forward(self, input_ids, seq_idx=None):
         from torch.utils.checkpoint import checkpoint
@@ -328,7 +327,7 @@ class BitMambaLLM(nn.Module):
         return self.norm(x)
 
 
-def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024):
+def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024, ignore_index=-100):
     """Compute cross-entropy without materializing the full logits tensor.
 
     Instead of computing logits for the entire sequence at once (which for
@@ -340,6 +339,7 @@ def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024):
         output_proj: nn.Module — the output head (model.output)
         targets:     (BS, seq_len)  — target token ids
         chunk_size:  int — number of tokens per chunk (default 1024)
+        ignore_index: int — label to ignore in loss (default -100)
 
     Returns:
         Scalar loss (mean cross-entropy over all tokens).
@@ -356,6 +356,7 @@ def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024):
             chunk_logits.reshape(-1, chunk_logits.size(-1)),
             chunk_targets,
             reduction='sum',
+            ignore_index=ignore_index,
         )
 
     return total_loss / n_tokens

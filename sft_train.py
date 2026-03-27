@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 import os
 import wandb
-from model import BitMambaLLM
+from model import BitMambaLLM, chunked_cross_entropy
 from optim import setup_mamba_optimizers
 from sft_data import SFT_STAGES, create_sft_dataloader
 from transformers import AutoTokenizer
@@ -59,12 +59,8 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
         for batch_idx, (x, y) in enumerate(train_loader):
             x, y = x.to(DEVICE), y.to(DEVICE)
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                logits = model(x, seq_idx=None) 
-                loss = F.cross_entropy(
-                    logits[..., :-1, :].contiguous().view(-1, logits.size(-1)),
-                    y[..., 1:].contiguous().view(-1),
-                    ignore_index=-100,
-                ) / GRAD_ACCUM_STEPS
+                hidden = model.forward_hidden(x, seq_idx=None)
+                loss = chunked_cross_entropy(hidden, model.output, y[..., 1:], ignore_index=-100) / GRAD_ACCUM_STEPS
             loss.backward()
             accumulated_loss += loss.item()
             
