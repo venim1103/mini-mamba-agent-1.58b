@@ -10,3 +10,5 @@ ninja
 packaging
 einops
 accelerate
+pytest
+coverage
