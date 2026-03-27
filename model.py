@@ -346,7 +346,7 @@ def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024, ignore_
     """
     bs, seq_len, _ = hidden.shape
     total_loss = 0.0
-    n_tokens = bs * seq_len
+    valid_tokens = (targets != ignore_index).sum().clamp(min=1)
 
     for i in range(0, seq_len, chunk_size):
         end = min(i + chunk_size, seq_len)
@@ -359,5 +359,5 @@ def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024, ignore_
             ignore_index=ignore_index,
         )
 
-    return total_loss / n_tokens
+    return total_loss / valid_tokens
 

@@ -203,7 +203,7 @@ def main():
             
             # Generate GROUP_SIZE completions
             model.eval()
-            completions_ids, completions_text = [], []
+            completions_ids, completions_text, old_log_probs_list = [], [], []
             with torch.no_grad():
                 for _ in range(GROUP_SIZE):
                     generated = model.generate(input_ids, max_new_tokens=MAX_GEN_TOKENS, temperature=0.8,
@@ -211,6 +211,18 @@ def main():
                     gen_only = generated[0][input_ids.shape[1]:]
                     completions_ids.append(gen_only.cpu())  # offload to CPU during generation
                     completions_text.append(tokenizer.decode(gen_only, skip_special_tokens=True))
+                    
+                    # Capture old_log_probs for PPO epsilon clipping
+                    full_seq = torch.cat([input_ids[0], gen_only]).unsqueeze(0)
+                    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                        hidden = model.forward_hidden(full_seq, seq_idx=None)
+                        hidden_slice = hidden[0:1, input_ids.shape[1]-1:-1, :]
+                        logits = model.output(hidden_slice)
+                        log_probs = -F.cross_entropy(
+                            logits[0, :, :].contiguous(),
+                            gen_only.contiguous(), reduction='none'
+                        )
+                    old_log_probs_list.append(log_probs.detach())
                     
             rewards = compute_rewards(completions_text, ground_truth)
             advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
@@ -221,13 +233,16 @@ def main():
                     for k, v in state.items():
                         if isinstance(v, torch.Tensor): state[k] = v.cuda()
             
-            # GRPO policy gradient step
+            # GRPO policy gradient step with PPO epsilon clipping
             model.train()
             for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
             policy_loss = 0.0
+            EPS = 0.2  # PPO epsilon clipping coefficient
             
             for i in range(GROUP_SIZE):
                 comp_ids = completions_ids[i].to(DEVICE)
+                old_log_probs = old_log_probs_list[i].to(DEVICE)
+                
                 full_seq = torch.cat([input_ids[0], comp_ids]).unsqueeze(0)
                 with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                     hidden = model.forward_hidden(full_seq, seq_idx=None)
@@ -237,7 +252,12 @@ def main():
                         logits[0, :, :].contiguous(),
                         comp_ids.contiguous(), reduction='none'
                     )
-                    loss = -(log_probs * advantages[i]).mean() / GROUP_SIZE
+                    
+                    # PPO epsilon clipping (DAPO-style without KL)
+                    ratio = torch.exp(log_probs - old_log_probs)
+                    surr1 = ratio * advantages[i]
+                    surr2 = torch.clamp(ratio, 1.0 - EPS, 1.0 + EPS) * advantages[i]
+                    loss = -torch.min(surr1, surr2).mean() / GROUP_SIZE
                 loss.backward()
                 policy_loss += loss.item()
                 

@@ -49,14 +49,15 @@ TRAIN_CONFIG = [
     {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.15}
 ]
 
-# UPDATED: Max Context capped at 16k (16384) to safely fit BS=2 on RTX 3090
+# UPDATED: Fixed context at 8192 for first 80% (stable phases), only expand to 16384 in decay
+# Per Nanbeige4-3B and Nemotron-H: expanding context during stable training ruins dynamics
 CURRICULUM_CONFIG = {
     "peak_lr": PEAK_LR, "end_lr": 1.5e-6,
     "phases": [
-        {"pct": 0.05, "ctx": 2048},   
-        {"pct": 0.40, "ctx": 4096},   
-        {"pct": 0.35, "ctx": 8192},   
-        {"pct": 0.20, "ctx": 16384}    
+        {"pct": 0.05, "ctx": 8192},   # warmup
+        {"pct": 0.40, "ctx": 8192},   # stable 1
+        {"pct": 0.35, "ctx": 8192},   # stable 2
+        {"pct": 0.20, "ctx": 16384}   # decay (extend context here!)
     ]
 }
 
@@ -99,7 +100,7 @@ def main():
     
     train_loader, tokenizer = create_dataloaders(
         TRAIN_CONFIG, tokenizer_path="custom_agentic_tokenizer", 
-        max_seq_len=16384, batch_size=BATCH_SIZE
+        max_seq_len=16384, batch_size=BATCH_SIZE  # Initial max for decay phase, will recreate for earlier phases
     )
     model.train()
     data_iter = iter(train_loader)
