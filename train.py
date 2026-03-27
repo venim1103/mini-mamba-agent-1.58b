@@ -27,6 +27,13 @@ if MODE == "scout":
     MODEL_CONFIG = dict(vocab_size=64000, dim=512, n_layers=24, d_state=64, expand=2, use_checkpoint=True)
     TOTAL_STEPS = 100_000 
     PEAK_LR = 4.5e-4 
+elif MODE == "upscaled":
+    # Continued pre-training after SOLAR upscaling (MiniPuzzle-inspired)
+    # Lower LR since model already has pretrained weights; shorter run
+    MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=64, d_state=128, expand=2, 
+                       use_checkpoint=True, use_attn=True, attn_pct=0.08)
+    TOTAL_STEPS = 20_000  # Short continued pretrain (5-10B tokens equivalent)
+    PEAK_LR = 1.0e-4  # Lower LR for continued training
 else:
     MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2, use_checkpoint=True)
     TOTAL_STEPS = 1_000_000 
@@ -130,6 +137,20 @@ def main():
     
     print(f"Initializing {MODE.upper()} BitMamba Model...")
     model = BitMambaLLM(**MODEL_CONFIG).to(DEVICE)
+    
+    # Load upscaled checkpoint if in continued pretraining mode
+    if MODE == "upscaled":
+        print("Loading upscaled checkpoint for continued pre-training...")
+        # Look for upscaled checkpoint in default location
+        upscale_ckpt = "checkpoints/upscaled/step_000000_1B_mamba.pt"
+        if os.path.exists(upscale_ckpt):
+            ckpt = torch.load(upscale_ckpt, map_location=DEVICE)
+            model.load_state_dict(ckpt['model_state_dict'])
+            print(f"Loaded upscaled weights from {upscale_ckpt}")
+        else:
+            print(f"Warning: Upscaled checkpoint not found at {upscale_ckpt}")
+            print("Please run: python upscale.py first")
+    
     # G12: torch.compile fuses elementwise ops → 10-20% activation memory savings + throughput
     model = torch.compile(model, mode="reduce-overhead")
     
