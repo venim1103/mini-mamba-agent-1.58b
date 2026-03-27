@@ -36,6 +36,15 @@ FILTER_HIGH = 0.90          # On-policy filtering: discard if pass_rate > 90%
 FILTER_BATCH = 64           # Number of problems to evaluate per filtering round
 MAX_GEN_TOKENS = 512
 
+
+def collect_data_files(root_dir):
+    files = []
+    for root, _, filenames in os.walk(root_dir, followlinks=True):
+        for name in filenames:
+            if name.endswith((".jsonl", ".json", ".parquet")):
+                files.append(os.path.join(root, name))
+    return files
+
 # ---------------------------------------------------------------------------
 # Reward functions — separated into format and accuracy (Llama-Nemotron §5.1)
 # ---------------------------------------------------------------------------
@@ -138,11 +147,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained("custom_agentic_tokenizer")
     eos_id = tokenizer.encode("<|im_end|>", add_special_tokens=False)[0]
     
-    files = []
-    for root, _, filenames in os.walk(LOCAL_RL_DATA):
-        for f in filenames:
-            if f.endswith((".jsonl", ".json", ".parquet")):
-                files.append(os.path.join(root, f))
+    files = collect_data_files(LOCAL_RL_DATA)
     if not files:
         raise FileNotFoundError(f"No .json/.jsonl/.parquet files found under {LOCAL_RL_DATA}")
 

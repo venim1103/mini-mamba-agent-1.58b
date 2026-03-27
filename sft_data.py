@@ -67,6 +67,24 @@ SFT_STAGES = [
 ]
 
 
+def _first_token_id(tokenizer, text, fallback_text=None):
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    if token_ids:
+        return token_ids[0]
+
+    if fallback_text is not None:
+        fallback_ids = tokenizer.encode(fallback_text, add_special_tokens=False)
+        if fallback_ids:
+            return fallback_ids[0]
+
+    for attr in ("eos_token_id", "pad_token_id", "unk_token_id"):
+        token_id = getattr(tokenizer, attr, None)
+        if token_id is not None:
+            return token_id
+
+    return 0
+
+
 class SFTChatDataset(Dataset):
     def __init__(self, data_path, tokenizer, max_seq_len=4096, reasoning_off_prob=0.3, format_hint=None):
         super().__init__()
@@ -118,9 +136,9 @@ class SFTChatDataset(Dataset):
                 fmt = "parquet" if data_path.endswith(".parquet") else "json"
             self.raw_data = load_dataset(fmt, data_files=data_path, split="train")
             
-        self.im_start = tokenizer.encode("<|im_start|>", add_special_tokens=False)[0]
-        self.im_end = tokenizer.encode("<|im_end|>", add_special_tokens=False)[0]
-        self.nl = tokenizer.encode("\n", add_special_tokens=False)[0]
+        self.im_start = _first_token_id(tokenizer, "<|im_start|>", fallback_text="<")
+        self.im_end = _first_token_id(tokenizer, "<|im_end|>", fallback_text=">")
+        self.nl = _first_token_id(tokenizer, "\n", fallback_text=" ")
 
     def __len__(self): return len(self.raw_data)
 

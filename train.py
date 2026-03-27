@@ -63,27 +63,27 @@ CHECKPOINT_DIR = f"checkpoints/bitmamba_{MODE}"
 TRAIN_CONFIGS = {
     "Phase_1": [  # Warmup - diverse mixed data
         {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.25},
-        {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.25},
+        {"name": "code",         "path": "local_data/train/code",  "format": "parquet", "weight": 0.25},
         {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "weight": 0.30},
-        {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.20}
+        {"name": "tool_use",     "path": "local_data/train/tools", "format": "parquet", "weight": 0.20}
     ],
     "Phase_2": [  # Stable 1 - heavy on web/diversity
         {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.20},
-        {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.20},
+        {"name": "code",         "path": "local_data/train/code",  "format": "parquet", "weight": 0.20},
         {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "weight": 0.45},
-        {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.15}
+        {"name": "tool_use",     "path": "local_data/train/tools", "format": "parquet", "weight": 0.15}
     ],
     "Phase_3": [  # Stable 2 - heavy on code/logic + synthetic CoT (Nanbeige4-3B)
         {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.30},
-        {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.25},
+        {"name": "code",         "path": "local_data/train/code",  "format": "parquet", "weight": 0.25},
         {"name": "synth_qa",     "path": "local_data/synth/web_qa", "format": "json",    "weight": 0.20},
         {"name": "synth_distill","path": "local_data/synth/code_distill","format": "json","weight": 0.15},
         {"name": "web",          "path": "local_data/train/web",   "format": "parquet", "weight": 0.05},
-        {"name": "tool_use",     "path": "local_data/train/tools", "format": "json",    "weight": 0.05}
+        {"name": "tool_use",     "path": "local_data/train/tools", "format": "parquet", "weight": 0.05}
     ],
     "Phase_4": [  # Decay - 100% high-quality reasoning/synthetic (Nemotron-H)
         {"name": "formal_logic", "path": "local_data/train/logic", "format": "parquet", "weight": 0.25},
-        {"name": "code",         "path": "local_data/train/code",  "format": "json",    "weight": 0.20},
+        {"name": "code",         "path": "local_data/train/code",  "format": "parquet", "weight": 0.20},
         {"name": "synth_qa",     "path": "local_data/synth/web_qa", "format": "json",    "weight": 0.20},
         {"name": "synth_distill","path": "local_data/synth/code_distill","format": "json","weight": 0.15},
         {"name": "synth_extract","path": "local_data/synth/knowledge_extract","format": "json","weight": 0.10},

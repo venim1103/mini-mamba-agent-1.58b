@@ -243,3 +243,29 @@ class TestReasoningToggle:
         assert "internal" not in stripped
         assert "Preamble" in stripped
         assert "Final answer" in stripped
+
+
+class TestTokenizerFallbacks:
+    def test_init_handles_empty_newline_encoding(self):
+        tok = MagicMock()
+        tok.pad_token_id = 7
+        tok.eos_token_id = 1
+
+        def _encode(text, add_special_tokens=False):
+            mapping = {
+                "<|im_start|>": [3],
+                "<|im_end|>": [4],
+                "\n": [],
+                " ": [9],
+            }
+            return mapping.get(text, [11])
+
+        tok.encode.side_effect = _encode
+
+        with patch("sft_data.load_dataset") as mock_ld, patch("os.path.isdir", return_value=False):
+            mock_ld.return_value = [{"messages": [{"role": "user", "content": "hi"}]}]
+            ds = SFTChatDataset("dummy.json", tok, max_seq_len=32)
+
+        assert ds.im_start == 3
+        assert ds.im_end == 4
+        assert ds.nl == 9
