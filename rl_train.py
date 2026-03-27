@@ -281,22 +281,6 @@ def main():
     wandb.finish()
 
 
-@torch.no_grad()
-def generate_wrapper(self, input_ids, max_new_tokens, temperature, do_sample, eos_token_id):
-    curr_ids = input_ids
-    for _ in range(max_new_tokens):
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            logits = self(curr_ids, seq_idx=None)
-        if do_sample:
-            next_token = torch.multinomial(F.softmax(logits[0, -1, :] / temperature, dim=-1), num_samples=1)
-        else:
-            next_token = logits[0, -1, :].argmax(dim=-1, keepdim=True)
-        curr_ids = torch.cat([curr_ids, next_token.unsqueeze(0)], dim=-1)
-        if next_token.item() == eos_token_id: break
-    return curr_ids
-
-BitMambaLLM.generate = generate_wrapper
-
 if __name__ == "__main__":
     main()
 

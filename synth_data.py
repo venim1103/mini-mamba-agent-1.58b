@@ -86,26 +86,8 @@ STRATEGY_PROMPTS = {
 
 
 # ---------------------------------------------------------------------------
-# Generation
+# Generation — uses model.generate() for O(n) cached inference
 # ---------------------------------------------------------------------------
-
-@torch.no_grad()
-def generate(model, input_ids, max_new_tokens, temperature, eos_id):
-    """Simple autoregressive generation (no KV cache)."""
-    curr_ids = input_ids
-    for _ in range(max_new_tokens):
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            logits = model(curr_ids, seq_idx=None)
-        if temperature > 0:
-            next_token = torch.multinomial(
-                F.softmax(logits[0, -1, :] / temperature, dim=-1), num_samples=1
-            )
-        else:
-            next_token = logits[0, -1, :].argmax(dim=-1, keepdim=True)
-        curr_ids = torch.cat([curr_ids, next_token.unsqueeze(0)], dim=-1)
-        if next_token.item() == eos_id:
-            break
-    return curr_ids
 
 
 def truncate_source(text, tokenizer, max_source_tokens=1024):
@@ -183,7 +165,11 @@ def run_pipeline(args):
             if input_ids.shape[1] > 2048:
                 continue  # skip overly long prompts
 
-            output_ids = generate(model, input_ids, args.max_new_tokens, args.temperature, eos_id)
+            output_ids = model.generate(
+                input_ids, max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature, do_sample=(args.temperature > 0),
+                eos_token_id=eos_id,
+            )
             gen_text = tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True)
 
             record = {

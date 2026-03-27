@@ -30,26 +30,20 @@ else:
 def generate(model, tokenizer, prompt, max_new_tokens=150, temperature=0.7):
     model.eval()
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(DEVICE)
+    eos_id = tokenizer.encode("<|im_end|>", add_special_tokens=False)[0]
     
     print(f"\nPrompt: {prompt}")
-    print("Generating...", end="", flush=True)
+    print("Generating...", flush=True)
     
-    with torch.no_grad():
-        for _ in range(max_new_tokens):
-            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                # seq_idx=None assumes a single contiguous document for inference
-                logits = model(input_ids, seq_idx=None)
-                
-            next_token_logits = logits[0, -1, :] / temperature
-            probs = torch.nn.functional.softmax(next_token_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-            
-            input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=-1)
-            print(tokenizer.decode(next_token[0]), end="", flush=True)
-            
-            if next_token.item() in [tokenizer.eos_token_id, tokenizer.encode("<|im_end|>", add_special_tokens=False)[0]]:
-                break
-    print("\n")
+    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        output_ids = model.generate(
+            input_ids, max_new_tokens=max_new_tokens, temperature=temperature,
+            do_sample=True, eos_token_id=eos_id
+        )
+    
+    generated_text = tokenizer.decode(output_ids[0][input_ids.shape[1]:], skip_special_tokens=False)
+    print(generated_text)
+    print()
 
 if __name__ == "__main__":
     print("Loading custom tokenizer...")

@@ -25,9 +25,15 @@ except ImportError:
     raise ImportError("Please install mamba-ssm>=2.0: pip install mamba-ssm")
 
 try:
-    from causal_conv1d import causal_conv1d_fn
+    from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 except ImportError:
     causal_conv1d_fn = None
+    causal_conv1d_update = None
+
+try:
+    from mamba_ssm.ops.triton.selective_state_update import selective_state_update
+except ImportError:
+    selective_state_update = None
 
 from einops import rearrange
 
@@ -174,6 +180,56 @@ class AttentionBlock(nn.Module):
         
         return hidden_states + self.o_proj(out)
 
+    def prefill(self, hidden_states):
+        """Full-sequence attention, returns output and KV cache for decoding."""
+        x = self.norm(hidden_states)
+        bsz, seqlen, _ = x.shape
+
+        q = self.q_proj(x).view(bsz, seqlen, self.n_heads, self.head_dim)
+        k = self.k_proj(x).view(bsz, seqlen, self.n_kv_heads, self.head_dim)
+        v = self.v_proj(x).view(bsz, seqlen, self.n_kv_heads, self.head_dim)
+
+        if self.n_kv_heads < self.n_heads:
+            repeat_factor = self.n_heads // self.n_kv_heads
+            k_exp = k.repeat_interleave(repeat_factor, dim=2)
+            v_exp = v.repeat_interleave(repeat_factor, dim=2)
+        else:
+            k_exp, v_exp = k, v
+
+        out = F.scaled_dot_product_attention(
+            q.transpose(1, 2), k_exp.transpose(1, 2), v_exp.transpose(1, 2),
+            is_causal=True,
+        ).transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
+
+        cache = {"k": k, "v": v}
+        return hidden_states + self.o_proj(out), cache
+
+    def step(self, hidden_states, cache):
+        """Single-token decode step with KV cache."""
+        x = self.norm(hidden_states)
+        bsz = x.shape[0]
+
+        q = self.q_proj(x).view(bsz, 1, self.n_heads, self.head_dim)
+        k_new = self.k_proj(x).view(bsz, 1, self.n_kv_heads, self.head_dim)
+        v_new = self.v_proj(x).view(bsz, 1, self.n_kv_heads, self.head_dim)
+
+        cache["k"] = torch.cat([cache["k"], k_new], dim=1)
+        cache["v"] = torch.cat([cache["v"], v_new], dim=1)
+
+        k, v = cache["k"], cache["v"]
+        if self.n_kv_heads < self.n_heads:
+            repeat_factor = self.n_heads // self.n_kv_heads
+            k = k.repeat_interleave(repeat_factor, dim=2)
+            v = v.repeat_interleave(repeat_factor, dim=2)
+
+        # Single query attending to all cached keys — no causal mask needed
+        out = F.scaled_dot_product_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
+            is_causal=False,
+        ).transpose(1, 2).contiguous().view(bsz, 1, self.dim)
+
+        return hidden_states + self.o_proj(out)
+
 # ==========================================
 # 2. BitMamba Block & Architecture
 # ==========================================
@@ -292,6 +348,155 @@ class BitMambaBlock(nn.Module):
         out = self.out_proj(y)
         return hidden_states + out
 
+    def prefill(self, hidden_states):
+        """Full-sequence Mamba-2 scan, returns output and (conv_state, ssm_state) for decoding."""
+        batch, seqlen, _ = hidden_states.shape
+        h = self.norm(hidden_states)
+
+        zxbcdt = self.in_proj(h)
+        z, xBC, dt = torch.split(
+            zxbcdt,
+            [self.d_inner, self.d_inner + 2 * self.ngroups * self.d_state, self.nheads],
+            dim=-1
+        )
+
+        # Save conv state: last d_conv inputs before convolution
+        xBC_t = xBC.transpose(1, 2)  # (batch, conv_dim, seqlen)
+        if seqlen >= self.d_conv:
+            conv_state = xBC_t[:, :, -self.d_conv:].clone()
+        else:
+            conv_state = F.pad(xBC_t, (self.d_conv - seqlen, 0)).clone()
+
+        # Apply conv1d
+        if causal_conv1d_fn is not None:
+            xBC = causal_conv1d_fn(
+                xBC_t,
+                rearrange(self.conv1d.weight, "d 1 w -> d w"),
+                self.conv1d.bias,
+                activation="silu",
+            ).transpose(1, 2)
+        else:
+            xBC = self.conv1d(xBC_t)[..., :seqlen].transpose(1, 2)
+            xBC = F.silu(xBC)
+
+        x, B, C = torch.split(
+            xBC,
+            [self.d_inner, self.ngroups * self.d_state, self.ngroups * self.d_state],
+            dim=-1
+        )
+
+        A = -torch.exp(self.A_log.float())
+
+        y, ssm_state = mamba_chunk_scan_combined(
+            rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
+            dt, A,
+            rearrange(B, "b l (g n) -> b l g n", g=self.ngroups),
+            rearrange(C, "b l (g n) -> b l g n", g=self.ngroups),
+            chunk_size=self.chunk_size,
+            D=self.D,
+            z=rearrange(z, "b l (h p) -> b l h p", p=self.headdim),
+            dt_bias=self.dt_bias,
+            dt_softplus=True,
+            return_final_states=True,
+        )
+        y = rearrange(y, "b l h p -> b l (h p)")
+        y = self.out_norm(y)
+        out = self.out_proj(y)
+
+        cache = {"conv_state": conv_state, "ssm_state": ssm_state}
+        return hidden_states + out, cache
+
+    def step(self, hidden_states, cache):
+        """Single-token Mamba-2 step with cached conv + SSM state.
+
+        Uses official causal_conv1d_update and selective_state_update Triton
+        kernels when available (matching the Mamba-2 reference implementation).
+        The SSD chunk-scan kernel and sequential step use algebraically
+        equivalent but numerically distinct accumulation orders, so step
+        outputs will have small relative differences (~0.5%) vs a full
+        forward pass.  This is inherent to the SSD formulation and matches
+        the upstream mamba-ssm behaviour.
+        """
+        dtype = hidden_states.dtype
+        h = self.norm(hidden_states)  # (bsz, 1, dim)
+
+        zxbcdt = self.in_proj(h).squeeze(1)  # (bsz, d_in_proj)
+        z, xBC, dt = torch.split(
+            zxbcdt,
+            [self.d_inner, self.d_inner + 2 * self.ngroups * self.d_state, self.nheads],
+            dim=-1
+        )
+
+        conv_state = cache["conv_state"]
+
+        if causal_conv1d_update is not None:
+            xBC = causal_conv1d_update(
+                xBC,
+                conv_state,
+                rearrange(self.conv1d.weight, "d 1 w -> d w"),
+                self.conv1d.bias,
+                activation="silu",
+            )
+        else:
+            conv_state = torch.roll(conv_state, shifts=-1, dims=-1)
+            conv_state[:, :, -1] = xBC
+            cache["conv_state"] = conv_state
+            xBC = (conv_state * self.conv1d.weight.squeeze(1)).sum(-1) + self.conv1d.bias
+            xBC = F.silu(xBC)
+
+        x, B, C = torch.split(
+            xBC,
+            [self.d_inner, self.ngroups * self.d_state, self.ngroups * self.d_state],
+            dim=-1
+        )
+
+        A = -torch.exp(self.A_log.float())
+        ssm_state = cache["ssm_state"]  # (bsz, nheads, headdim, d_state)
+
+        if selective_state_update is not None:
+            x = rearrange(x, "b (h p) -> b h p", p=self.headdim)
+            z = rearrange(z, "b (h p) -> b h p", p=self.headdim)
+            B = rearrange(B, "b (g n) -> b g n", g=self.ngroups)
+            C = rearrange(C, "b (g n) -> b g n", g=self.ngroups)
+            # selective_state_update expects per-element A/dt/D with stride-0
+            # broadcasting along headdim (detected via tie_hdim optimisation).
+            A_ssm = A.view(self.nheads, 1, 1).expand(self.nheads, self.headdim, self.d_state)
+            dt_ssm = dt.unsqueeze(-1).expand(-1, -1, self.headdim)
+            dt_bias_ssm = self.dt_bias.unsqueeze(-1).expand(-1, self.headdim)
+            D_ssm = self.D.unsqueeze(-1).expand(-1, self.headdim)
+            y = selective_state_update(
+                ssm_state, x, dt_ssm, A_ssm, B, C,
+                D=D_ssm, z=z,
+                dt_bias=dt_bias_ssm, dt_softplus=True,
+            )
+            y = rearrange(y, "b h p -> b (h p)")
+        else:
+            x = rearrange(x, "b (h p) -> b h p", p=self.headdim).float()
+            B = rearrange(B, "b (g n) -> b g n", g=self.ngroups).float()
+            C = rearrange(C, "b (g n) -> b g n", g=self.ngroups).float()
+            heads_per_group = self.nheads // self.ngroups
+            B = B.repeat_interleave(heads_per_group, dim=1)
+            C = C.repeat_interleave(heads_per_group, dim=1)
+
+            dt_act = F.softplus(dt.float() + self.dt_bias.float())
+            dA = torch.exp(dt_act * A)
+            dB = dt_act.unsqueeze(-1) * B
+
+            ssm_state = dA.unsqueeze(-1).unsqueeze(-1) * ssm_state + torch.einsum("bhn,bhp->bhpn", dB, x)
+            cache["ssm_state"] = ssm_state
+
+            y = torch.einsum("bhpn,bhn->bhp", ssm_state, C)
+            y = y + self.D.float().unsqueeze(-1) * x
+            z = rearrange(z, "b (h p) -> b h p", p=self.headdim).float()
+            y = y * F.silu(z)
+            y = rearrange(y, "b h p -> b (h p)")
+
+        y = y.unsqueeze(1).to(dtype)  # (bsz, 1, d_inner)
+        y = self.out_norm(y)
+        out = self.out_proj(y)
+
+        return hidden_states + out
+
 class BitMambaLLM(nn.Module):
     def __init__(self, vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2,
                  headdim=64, ngroups=1, chunk_size=256, use_checkpoint=False,
@@ -343,6 +548,49 @@ class BitMambaLLM(nn.Module):
     def forward_hidden(self, input_ids, seq_idx=None):
         """Return pre-logit hidden states (G2: for chunked cross-entropy)."""
         return self._backbone(input_ids, seq_idx)
+
+    @torch.no_grad()
+    def generate(self, input_ids, max_new_tokens=512, temperature=0.7,
+                 do_sample=True, eos_token_id=None):
+        """O(n) autoregressive generation with cached SSM/KV states.
+
+        Prefills the prompt in one pass, then decodes one token at a time
+        using per-layer conv/SSM state (Mamba blocks) and KV cache (attention blocks).
+        """
+        self.eval()
+
+        # --- Prefill: process the full prompt ---
+        x = self.tok_embeddings(input_ids)
+        caches = []
+        for layer in self.layers:
+            x, cache = layer.prefill(x)
+            caches.append(cache)
+        x = self.norm(x)
+        logits = self.output(x[:, -1:, :])  # (B, 1, vocab)
+
+        # --- Decode: one token at a time ---
+        generated = input_ids
+        for _ in range(max_new_tokens):
+            if do_sample and temperature > 0:
+                next_token = torch.multinomial(
+                    F.softmax(logits[0, -1, :] / temperature, dim=-1), num_samples=1
+                )
+            else:
+                next_token = logits[0, -1, :].argmax(dim=-1, keepdim=True)
+
+            generated = torch.cat([generated, next_token.unsqueeze(0)], dim=-1)
+
+            if eos_token_id is not None and next_token.item() == eos_token_id:
+                break
+
+            # Single-token forward through cached layers
+            x = self.tok_embeddings(next_token.unsqueeze(0))  # (1, 1, dim)
+            for i, layer in enumerate(self.layers):
+                x = layer.step(x, caches[i])
+            x = self.norm(x)
+            logits = self.output(x)  # (1, 1, vocab)
+
+        return generated
 
 
 def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024, ignore_index=-100):
