@@ -970,28 +970,21 @@ return total_loss / valid_tokens
 
 ---
 
-## 2. Remaining Architectural Tasks
+## 2. Architectural Tasks (Status Updated)
 
 ### 2.1 FG-WSD (Fine-Grained Weighted Sampling Distribution) — Data Quality Progression
 
-**Current State:** In `train.py`, the `TRAIN_CONFIG` weights are fixed (`0.35, 0.30, 0.20, 0.15`) for the entire 100k steps.
+**Status:** ✅ Fixed.
 
-**Should it be implemented?** **YES.** The entire point of Fine-Grained WSD (from Nanbeige4) is to keep the learning rate flat while *increasing the quality of the data*. 
-
-**How to fix:** In `train.py`, the `scheduler.step(step)` returns `phase_name`. You should define different `TRAIN_CONFIG` mixtures per phase, and recreate your dataloader when the phase changes (you are already doing this for context changes!).
-- *Warmup/Stable 1:* Heavy on Web data
-- *Stable 2:* Heavy on Logic and Code
-- *Decay:* 100% High-Quality reasoning/synthetic data
+`train.py` now uses phase-specific `TRAIN_CONFIGS` and reloads the dataloader on phase changes, implementing progressive data-mixture refinement across warmup/stable/decay phases.
 
 ---
 
 ### 2.2 Context-Window Strategy — Flatten the Curriculum
 
-**Current State:** `train.py` steps the context from 2k → 4k → 8k → 16k across the 4 phases.
+**Status:** ✅ Fixed.
 
-**Should it be implemented?** **YES.** Expanding the context during the *stable* phase ruins the training dynamics because it drastically changes the number of tokens per batch. Both Nanbeige4 and Nemotron-H explicitly warn against this.
-
-**How to fix:** Pre-train at a fixed context (e.g., `8192`) for the first 80% of training. Only expand to `16384` during the final 20% (the decay phase).
+The curriculum is flattened to 8k for warmup/stable phases and expands to 16k only in decay.
 
 ```python
 # Update CURRICULUM_CONFIG in train.py
@@ -1007,9 +1000,9 @@ return total_loss / valid_tokens
 
 ### 2.3 Synthetic Data Pipeline Integration
 
-**Current State:** You have a `synth_data.py` script, but it is not integrated into the training loops.
+**Status:** ✅ Fixed.
 
-**Should it be implemented?** **YES.** 1.58b models absolutely require distilled Chain-of-Thought (CoT) from larger models to learn how to use `<think>` tags properly. Ensure you use `synth_data.py` to generate synthetic logs and include them in the *Stable 2* and *Decay* phases of your FG-WSD progression.
+Synthetic data is integrated into later curriculum phases (Stable 2 + Decay) through phase-specific dataset configs, and `synth_data.py` is used to generate those corpora.
 
 ---
 
@@ -1023,9 +1016,9 @@ return total_loss / valid_tokens
 
 ### 3.2 RL Epsilon Clipping (PPO stability)
 
-Your GRPO implementation calculates `policy_loss = -(log_probs * advantages[i]).mean()`. You removed the KL penalty (which is correct for DAPO), but without KL *and* without PPO's standard epsilon clipping, a single batch with a massive advantage could destroy the model weights via a giant gradient update.
+**Status:** ✅ Fixed.
 
-**The Fix:** You need to track the old `log_probs` (from the initial generation) and clip the ratio.
+GRPO now tracks `old_log_probs` and applies PPO epsilon clipping (`EPS=0.2`) to stabilize policy updates without KL regularization.
 
 ```python
 ratio = torch.exp(log_probs - old_log_probs)
@@ -1038,11 +1031,13 @@ loss = -torch.min(surr1, surr2).mean()
 
 ## Final Verdict
 
-This codebase is now in an elite tier for consumer-hardware LLM training. All three critical fixes have been implemented:
+This codebase is now in an elite tier for consumer-hardware LLM training. The Part IV scope items are implemented:
 
 1. ✅ Fixed the `chunked_cross_entropy` valid token division (model.py:330-364)
 2. ✅ Flattened context window expansion (train.py:52-62)
 3. ✅ Added PPO epsilon clipping to RL script (rl_train.py:204-247)
+
+Part V below supersedes this section with the later full-codebase audit updates.
 
 ---
 ---
@@ -1198,22 +1193,24 @@ But Phase 1's context is `8192`. The data packing produces 16k-token chunks that
 
 ---
 
-## Remaining Architectural Notes (unfixed — not bugs)
+## Remaining Architectural Notes (resolved)
 
-### A. AttentionBlock Creates O(seq²) Mask Every Forward Pass (model.py)
+### A. ✅ AttentionBlock O(seq²) Causal Mask Allocation (model.py)
 
-For seq=16384, each attention layer allocates a 256 MB bool tensor per call:
-```python
-mask = torch.triu(torch.ones(seqlen, seqlen, device=x.device, dtype=torch.bool), diagonal=1)
-```
-Consider caching the mask or switching to `F.scaled_dot_product_attention` which handles causal masking internally.
+**Status:** Fixed.
 
-### B. AttentionBlock Ignores `seq_idx` — Cross-Document Contamination (model.py)
+Replaced explicit score+mask attention (`einsum` + full `torch.triu` bool mask) with `F.scaled_dot_product_attention(..., is_causal=True)`. This avoids materializing a full causal mask tensor every forward pass and significantly reduces peak attention memory overhead.
 
-The `seq_idx` parameter is accepted but unused by `AttentionBlock`. In packed sequences, tokens from Document A can attend to tokens from Document B. The Mamba layers correctly flush state at boundaries via `seq_idx`, but the ~8% attention layers allow cross-document contamination. Fix by incorporating document boundaries into the attention mask.
+### B. ✅ AttentionBlock Cross-Document Leakage via Unused `seq_idx` (model.py)
 
-### C. SFT Drops Partial Gradient Accumulation at Epoch Boundaries (sft_train.py)
+**Status:** Fixed.
 
-If the number of batches per epoch isn't divisible by `GRAD_ACCUM_STEPS`, the last partial batch's gradients are silently discarded when the next epoch calls `zero_grad()`.
+Implemented seq_idx-aware segmented attention. When `seq_idx` is provided, attention is computed per contiguous segment boundary so tokens only attend within their own document segment, preventing cross-document contamination in packed batches.
+
+### C. ✅ SFT Drops Partial Gradient Accumulation at Epoch Boundaries (sft_train.py)
+
+**Status:** Fixed.
+
+Added explicit tail handling so the final partial micro-batch window in each epoch triggers an optimizer step and uses the correct accumulation divisor (`tail_steps`) instead of always dividing by `GRAD_ACCUM_STEPS`.
 
 (End of file)

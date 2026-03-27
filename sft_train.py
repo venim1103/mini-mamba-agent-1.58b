@@ -55,16 +55,26 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
     for epoch in range(epochs):
         for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
         accumulated_loss = 0.0
+        n_batches = len(train_loader)
+        tail_steps = n_batches % GRAD_ACCUM_STEPS
         
         for batch_idx, (x, y) in enumerate(train_loader):
             x, y = x.to(DEVICE), y.to(DEVICE)
+
+            # Avoid under-scaling the final partial accumulation window.
+            if tail_steps > 0 and batch_idx >= n_batches - tail_steps:
+                accum_divisor = tail_steps
+            else:
+                accum_divisor = GRAD_ACCUM_STEPS
+
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 hidden = model.forward_hidden(x, seq_idx=None)
-                loss = chunked_cross_entropy(hidden[:, :-1, :], model.output, y[..., 1:], ignore_index=-100) / GRAD_ACCUM_STEPS
+                loss = chunked_cross_entropy(hidden[:, :-1, :], model.output, y[..., 1:], ignore_index=-100) / accum_divisor
             loss.backward()
             accumulated_loss += loss.item()
             
-            if (batch_idx + 1) % GRAD_ACCUM_STEPS == 0:
+            should_step = ((batch_idx + 1) % GRAD_ACCUM_STEPS == 0) or (batch_idx + 1 == n_batches)
+            if should_step:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 # Fix #14: Call scheduler.step() before get_last_lr() to avoid warning
                 scheduler.step()

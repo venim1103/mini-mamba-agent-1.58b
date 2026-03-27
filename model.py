@@ -133,21 +133,43 @@ class AttentionBlock(nn.Module):
             repeat_factor = self.n_heads // self.n_kv_heads
             k = k.repeat_interleave(repeat_factor, dim=2)
             v = v.repeat_interleave(repeat_factor, dim=2)
-        
-        # Simple causal attention (no flash attention for compatibility)
-        # Scale
-        q = q * (self.head_dim ** -0.5)
-        
-        # Attention scores
-        attn = torch.einsum("bqhd,bkhd->bhqk", q, k)
-        
-        # Causal mask
-        seqlen = x.shape[1]
-        mask = torch.triu(torch.ones(seqlen, seqlen, device=x.device, dtype=torch.bool), diagonal=1)
-        attn = attn.masked_fill(mask, float('-inf'))
-        
-        attn = F.softmax(attn, dim=-1)
-        out = torch.einsum("bhqk,bkhd->bqhd", attn, v)
+
+        # Use PyTorch SDPA to avoid explicitly materializing a full causal mask.
+        # Shapes for SDPA are (B, H, L, D).
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        if seq_idx is None:
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True)
+            out = out.transpose(1, 2)
+        else:
+            # Enforce document boundaries from seq_idx by attending only within
+            # each contiguous segment. This prevents cross-document leakage.
+            batch_size, _, seqlen, _ = q.shape
+            out = torch.empty_like(hidden_states.new_empty(batch_size, seqlen, self.n_heads, self.head_dim))
+            for b in range(batch_size):
+                seg = seq_idx[b]
+                changes = torch.nonzero(seg[1:] != seg[:-1], as_tuple=False).flatten() + 1
+                boundaries = torch.cat([
+                    torch.tensor([0], device=seg.device, dtype=torch.long),
+                    changes.to(torch.long),
+                    torch.tensor([seqlen], device=seg.device, dtype=torch.long),
+                ])
+
+                for i in range(boundaries.numel() - 1):
+                    start = boundaries[i].item()
+                    end = boundaries[i + 1].item()
+                    if end <= start:
+                        continue
+                    q_seg = q[b:b + 1, :, start:end, :]
+                    k_seg = k[b:b + 1, :, start:end, :]
+                    v_seg = v[b:b + 1, :, start:end, :]
+                    out_seg = F.scaled_dot_product_attention(
+                        q_seg, k_seg, v_seg, attn_mask=None, dropout_p=0.0, is_causal=True
+                    )
+                    out[b:b + 1, start:end, :, :] = out_seg.transpose(1, 2)
+
         out = out.contiguous().view(x.shape[0], x.shape[1], self.dim)
         
         return hidden_states + self.o_proj(out)
