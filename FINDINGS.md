@@ -577,7 +577,7 @@ Document this as intentional. Consider whether the embedding should instead be a
 | **P2** | ✅ Increase GROUP_SIZE to 8-16, add format rewards | Llama-Nemotron |
 | **P2** | ✅ Add synthetic data generation pipeline | Nemotron-H, Nanbeige4-3B |
 | **P3** | ✅ Fix context-window strategy (fixed → expand in decay) | Nanbeige4-3B, Nemotron-H |
-| **P3** | Add continued pre-training after SOLAR upscale | MiniPuzzle insights |
+| **P3** | ✅ Add continued pre-training after SOLAR upscale | MiniPuzzle insights |
 
 ---
 

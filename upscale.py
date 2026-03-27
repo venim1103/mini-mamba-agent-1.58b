@@ -76,7 +76,12 @@ def upscaler(small_ckpt_path, output_ckpt_path):
         'recommended_mode': 'upscaled',
     }, output_ckpt_path)
     print("Done! Continued pre-training is REQUIRED after upscaling.")
-    print("Run: MODE=upscaled python train.py")
+    print("")
+    print("To continue pre-training the upscaled model:")
+    print("  1. Set MODE='upscaled' in train.py (line 24)")
+    print("  2. Run: MODE=upscaled python train.py")
+    print("  3. This will train for 20k steps at lower LR (1e-4) to let")
+    print("     duplicated layers differentiate (MiniPuzzle-inspired)")
 
 if __name__ == "__main__":
     os.makedirs("checkpoints/upscaled", exist_ok=True)
