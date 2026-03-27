@@ -304,19 +304,8 @@ class BitMambaLLM(nn.Module):
         self.norm = RMSNorm(dim)
         self.output = BitLinear(dim, vocab_size, bias=False)
 
-    def forward(self, input_ids, seq_idx=None):
-        from torch.utils.checkpoint import checkpoint
-        x = self.tok_embeddings(input_ids)
-        for layer in self.layers:
-            if self.use_checkpoint and self.training:
-                x = checkpoint(layer, x, seq_idx, use_reentrant=False)
-            else:
-                x = layer(x, seq_idx=seq_idx)
-        x = self.norm(x)
-        return self.output(x)
-
-    def forward_hidden(self, input_ids, seq_idx=None):
-        """Return pre-logit hidden states (G2: for chunked cross-entropy)."""
+    def _backbone(self, input_ids, seq_idx=None):
+        """Shared backbone: embedding → layers → norm. Used by both forward and forward_hidden."""
         from torch.utils.checkpoint import checkpoint
         x = self.tok_embeddings(input_ids)
         for layer in self.layers:
@@ -325,6 +314,13 @@ class BitMambaLLM(nn.Module):
             else:
                 x = layer(x, seq_idx=seq_idx)
         return self.norm(x)
+
+    def forward(self, input_ids, seq_idx=None):
+        return self.output(self._backbone(input_ids, seq_idx))
+
+    def forward_hidden(self, input_ids, seq_idx=None):
+        """Return pre-logit hidden states (G2: for chunked cross-entropy)."""
+        return self._backbone(input_ids, seq_idx)
 
 
 def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024, ignore_index=-100):

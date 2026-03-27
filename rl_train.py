@@ -25,7 +25,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SFT_CKPT = "checkpoints/sft/sft_final.pt"
 LOCAL_RL_DATA = "local_data/rl/reasoning" 
 CHECKPOINT_DIR = "checkpoints/rl"
-MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2)
+MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2, use_checkpoint=True)
 
 BATCH_SIZE = 1
 GROUP_SIZE = 8             # Increased from 4 (Nanbeige4-3B / Llama-Nemotron recommend 8-16)

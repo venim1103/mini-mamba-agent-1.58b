@@ -1044,4 +1044,176 @@ This codebase is now in an elite tier for consumer-hardware LLM training. All th
 2. ✅ Flattened context window expansion (train.py:52-62)
 3. ✅ Added PPO epsilon clipping to RL script (rl_train.py:204-247)
 
+---
+---
+
+# Part V — Full Codebase Audit (March 27, 2026)
+
+*Complete re-read of every source file. Cross-referenced all FINDINGS items against current code. Found 3 critical issues and 3 bugs — all fixed.*
+
+---
+
+## CRITICAL — Silent data corruption or wasted computation
+
+### 22. ✅ Finding #6 Off-By-One Was NOT Actually Fixed (data.py)
+
+The comment block for Fix #6 was added but the logic was unchanged. The variable `doc_tokens_consumed` was incremented but **never used** — dead code from the attempted fix.
+
+**The Problem:** `packed_token_stream` consumes `max_seq_len + 1` tokens from the buffer per chunk (for overlapping x/y pairs), but `doc_lengths` only accounts for `max_seq_len`. Each chunk causes a 1-token drift between `doc_lengths` and the actual buffer contents. Over thousands of chunks, document boundaries in `cu_seqlens` become progressively incorrect, silently degrading the `seq_idx` state-flushing mechanism in Mamba-2.
+
+**Concrete Example** (max_seq_len=4):
+1. Buffer: `[A,A,A,B,B,B,B,B]`, doc_lengths: `[3, 5]`
+2. Chunk takes 5 tokens `[A,A,A,B,B]`, buffer → `[B,B,B]`
+3. doc_lengths adjusts for only 4 tokens (3 from A + 1 partial from B) → `[4]`
+4. But only 3 B-tokens remain — **drift of 1 token per chunk, accumulating indefinitely**
+
+**Fix:** After the `cu_seqlens` computation, subtract the extra overlap token from the trailing document's remaining length:
+
+```python
+# After cu_seqlens computation, before advancing buffer:
+if len(doc_lengths) > 0:
+    doc_lengths[0] -= 1        # account for the +1 overlap token
+    if doc_lengths[0] <= 0:
+        doc_lengths.pop(0)
+
+buffer = buffer[max_seq_len + 1:]
+```
+
+Removed the dead `doc_tokens_consumed` variable.
+
+---
+
+### 23. ✅ `upscale.py` Parent Architecture Mismatch — Silently Loses Pretrained Weights
+
+**The Problem:** The parent model is trained as pure Mamba (`use_attn=False` in `train.py`'s default config). But `upscale.py` creates the dummy small model with `use_attn=True, attn_pct=0.08`:
+
+```python
+small_model_tmp = BitMambaLLM(
+    vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2,
+    use_attn=True, attn_pct=0.08,   # ← WRONG: parent wasn't trained with attention
+)
+```
+
+This generates `small_attn_indices = {6, 19, 32}`. Since the real parent checkpoint has **no** attention layers (all layers are Mamba), the type-matching logic silently drops weights:
+
+- Target layer 19 (Mamba) ← source layer 19 tagged as "attention" → type mismatch → **skip** → random init
+- Target layer 43 (Mamba, source=19 via offset) → same problem → **random init**
+- Target layer 56 (Mamba, source=32 via offset) → same problem → **random init**
+
+Three Mamba layers silently lose their pretrained weights, replaced with random initialization, with no warning printed.
+
+**Fix:** Changed the dummy small model to `use_attn=False` to match the actual parent training config.
+
+---
+
+### 24. ✅ `torch.compile` Never Applies to Training — `forward_hidden()` Bypasses Compilation (model.py + train.py)
+
+**The Problem:** `train.py` calls:
+```python
+model = torch.compile(model, mode="reduce-overhead")
+```
+
+This compiles `model.__call__` (which delegates to `model.forward`). But the training loop calls:
+```python
+hidden = model.forward_hidden(x, seq_idx=seq_idx)
+```
+
+When `torch.compile` wraps a model, calling `model.forward_hidden()` goes through `OptimizedModule.__getattr__` → `model._orig_mod.forward_hidden()`, running **entirely uncompiled**. The startup compilation overhead (warmup JIT time + memory) is paid but the throughput benefit is never realized during training.
+
+**Fix:** Extracted a shared `_backbone()` method used by both `forward()` and `forward_hidden()`, and compile that instead:
+
+```python
+# model.py
+def _backbone(self, input_ids, seq_idx=None):
+    x = self.tok_embeddings(input_ids)
+    for layer in self.layers:
+        if self.use_checkpoint and self.training:
+            x = checkpoint(layer, x, seq_idx, use_reentrant=False)
+        else:
+            x = layer(x, seq_idx=seq_idx)
+    return self.norm(x)
+
+def forward(self, input_ids, seq_idx=None):
+    return self.output(self._backbone(input_ids, seq_idx))
+
+def forward_hidden(self, input_ids, seq_idx=None):
+    return self._backbone(input_ids, seq_idx)
+
+# train.py
+model._backbone = torch.compile(model._backbone, mode="reduce-overhead")
+```
+
+---
+
+## BUGS — Incorrect behavior
+
+### 25. ✅ `sft_train.py` and `rl_train.py` Missing Gradient Checkpointing (sft_train.py + rl_train.py)
+
+Both scripts define `MODEL_CONFIG` without `use_checkpoint=True`:
+
+```python
+MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2)
+```
+
+The pre-training script (`train.py`) correctly includes `use_checkpoint=True`, but SFT and RL do not. Without checkpointing, the 40-layer parent model at ctx=4096 uses ~4.5 GB extra activation memory — making training on 12 GB GPUs marginal or impossible.
+
+**Fix:** Added `use_checkpoint=True` to `MODEL_CONFIG` in both `sft_train.py` and `rl_train.py`.
+
+---
+
+### 26. ✅ SFT Padding Uses Token ID 0 Instead of Pad Token (sft_data.py)
+
+`sft_collate_fn` pads input_ids with token ID 0:
+
+```python
+ids = torch.cat([ids, torch.zeros(pad_len, dtype=torch.long)])
+```
+
+Token ID 0 is whatever the first vocabulary entry happens to be — not the pad token (`<|pad|>`). While labels are correctly padded with `-100` (so the loss is unaffected), the model still **processes** these garbage token embeddings through all layers. For `AttentionBlock` layers specifically, subsequent tokens attend to these incorrect padding embeddings, diluting attention scores.
+
+**Fix:** Changed `sft_collate_fn` to accept a `pad_token_id` parameter (default 0 for backward compatibility). `create_sft_dataloader` now passes `tokenizer.pad_token_id` via `functools.partial`:
+
+```python
+def sft_collate_fn(batch, pad_token_id=0):
+    # ...
+    ids = torch.cat([ids, torch.full((pad_len,), pad_token_id, dtype=torch.long)])
+```
+
+---
+
+### 27. ✅ Double DataLoader Recreation + Wrong Initial Context (train.py)
+
+**Two issues in the training loop:**
+
+**27a.** At the Phase 3→4 boundary, both the phase AND context window change simultaneously (8192→16384). Two independent `if` blocks each fire and recreate the DataLoader — the first creates it, then the second immediately discards and recreates it with the same config. Wasteful and fragile.
+
+**27b.** The initial DataLoader is created with `max_seq_len=16384`:
+```python
+train_loader, tokenizer = create_dataloaders(
+    TRAIN_CONFIGS["Phase_1"], ..., max_seq_len=16384, ...)
+```
+But Phase 1's context is `8192`. The data packing produces 16k-token chunks that are then truncated to 8192 via `x[:, :current_ctx]` — discarding half the packed data every step during warmup.
+
+**Fix:** Merged the two reload conditions into a single `need_reload` flag. Changed initial `max_seq_len` to read from `CURRICULUM_CONFIG['phases'][0]['ctx']`.
+
+---
+
+## Remaining Architectural Notes (unfixed — not bugs)
+
+### A. AttentionBlock Creates O(seq²) Mask Every Forward Pass (model.py)
+
+For seq=16384, each attention layer allocates a 256 MB bool tensor per call:
+```python
+mask = torch.triu(torch.ones(seqlen, seqlen, device=x.device, dtype=torch.bool), diagonal=1)
+```
+Consider caching the mask or switching to `F.scaled_dot_product_attention` which handles causal masking internally.
+
+### B. AttentionBlock Ignores `seq_idx` — Cross-Document Contamination (model.py)
+
+The `seq_idx` parameter is accepted but unused by `AttentionBlock`. In packed sequences, tokens from Document A can attend to tokens from Document B. The Mamba layers correctly flush state at boundaries via `seq_idx`, but the ~8% attention layers allow cross-document contamination. Fix by incorporating document boundaries into the attention mask.
+
+### C. SFT Drops Partial Gradient Accumulation at Epoch Boundaries (sft_train.py)
+
+If the number of batches per epoch isn't divisible by `GRAD_ACCUM_STEPS`, the last partial batch's gradients are silently discarded when the next epoch calls `zero_grad()`.
+
 (End of file)

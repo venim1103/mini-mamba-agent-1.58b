@@ -29,9 +29,10 @@ def upscaler(small_ckpt_path, output_ckpt_path):
     big_state_dict = big_model.state_dict()
 
     # Identify which layers are attention vs mamba in each model
+    # Parent was trained WITHOUT attention (pure Mamba), so use_attn=False
     small_model_tmp = BitMambaLLM(
         vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2,
-        use_attn=True, attn_pct=0.08,
+        use_attn=False,
     )
     small_attn_indices = small_model_tmp.attn_indices
     big_attn_indices = big_model.attn_indices

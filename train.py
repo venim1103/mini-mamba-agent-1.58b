@@ -151,21 +151,22 @@ def main():
             print(f"Warning: Upscaled checkpoint not found at {upscale_ckpt}")
             print("Please run: python upscale.py first")
     
-    # G12: torch.compile fuses elementwise ops → 10-20% activation memory savings + throughput
-    model = torch.compile(model, mode="reduce-overhead")
+    # G12: torch.compile the shared backbone so both forward() and forward_hidden() benefit
+    model._backbone = torch.compile(model._backbone, mode="reduce-overhead")
     
     muon_opt, adam_opt, mamba_core_opt = setup_mamba_optimizers(model, CURRICULUM_CONFIG)
     scheduler = FGWSD_Scheduler(muon_opt, adam_opt, mamba_core_opt, TOTAL_STEPS, CURRICULUM_CONFIG)
     
     # Start with Phase_1 (warmup) data config for FG-WSD
+    initial_ctx = CURRICULUM_CONFIG['phases'][0]['ctx']
     train_loader, tokenizer = create_dataloaders(
         TRAIN_CONFIGS["Phase_1"], tokenizer_path="custom_agentic_tokenizer", 
-        max_seq_len=16384, batch_size=BATCH_SIZE
+        max_seq_len=initial_ctx, batch_size=BATCH_SIZE
     )
     model.train()
     data_iter = iter(train_loader)
     total_tokens, t0 = 0, time.time()
-    previous_ctx = 16384  # G9: track previous ctx to detect changes
+    previous_ctx = initial_ctx
     previous_phase = "Phase_1"  # Track phase changes for FG-WSD data quality progression
     # G10: GradScaler for FP16 (no-op when using BF16)
     scaler = torch.amp.GradScaler(enabled=(AMP_DTYPE == torch.float16))
@@ -173,18 +174,16 @@ def main():
     for step in range(TOTAL_STEPS):
         current_lr, current_ctx, phase_name = scheduler.step(step)
         
-        # FG-WSD: Recreate DataLoader when phase changes (data quality progression)
+        # FG-WSD: Recreate DataLoader when phase or context window changes
+        need_reload = False
         if phase_name != previous_phase and phase_name != "Complete" and previous_phase is not None:
-            train_loader, _ = create_dataloaders(
-                TRAIN_CONFIGS[phase_name], tokenizer_path="custom_agentic_tokenizer",
-                max_seq_len=current_ctx, batch_size=BATCH_SIZE
-            )
-            data_iter = iter(train_loader)
+            need_reload = True
             print(f"  [FG-WSD] Phase changed to {phase_name}: data quality updated")
             wandb.log({"System/FG_WSD_Phase": phase_name}, step=step)
-        
-        # G9: Recreate DataLoader when context window changes to avoid transfer waste
         if current_ctx != previous_ctx:
+            need_reload = True
+        
+        if need_reload:
             train_loader, _ = create_dataloaders(
                 TRAIN_CONFIGS.get(phase_name, TRAIN_CONFIG), tokenizer_path="custom_agentic_tokenizer",
                 max_seq_len=current_ctx, batch_size=BATCH_SIZE

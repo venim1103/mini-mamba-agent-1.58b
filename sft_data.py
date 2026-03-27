@@ -205,7 +205,7 @@ class SFTChatDataset(Dataset):
         return torch.tensor(input_ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
 
 
-def sft_collate_fn(batch):
+def sft_collate_fn(batch, pad_token_id=0):
     """Dynamic padding to the longest sequence in the batch (not global max)."""
     input_ids_list, labels_list = zip(*batch)
     max_len = max(ids.size(0) for ids in input_ids_list)
@@ -214,7 +214,7 @@ def sft_collate_fn(batch):
     for ids, lbl in zip(input_ids_list, labels_list):
         pad_len = max_len - ids.size(0)
         if pad_len > 0:
-            ids = torch.cat([ids, torch.zeros(pad_len, dtype=torch.long)])
+            ids = torch.cat([ids, torch.full((pad_len,), pad_token_id, dtype=torch.long)])
             lbl = torch.cat([lbl, torch.full((pad_len,), -100, dtype=torch.long)])
         padded_ids.append(ids)
         padded_labels.append(lbl)
@@ -237,9 +237,12 @@ def create_sft_dataloader(data_paths, tokenizer, max_seq_len=4096, batch_size=2,
             format_hint = None
         datasets.append(SFTChatDataset(path, tokenizer, max_seq_len, reasoning_off_prob, format_hint=format_hint))
     
+    import functools
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    collate = functools.partial(sft_collate_fn, pad_token_id=pad_id)
     combined = ConcatDataset(datasets) if len(datasets) > 1 else datasets[0]
     return DataLoader(
         combined, batch_size=batch_size, shuffle=True,
-        pin_memory=True, num_workers=4, collate_fn=sft_collate_fn
+        pin_memory=True, num_workers=4, collate_fn=collate
     )
 

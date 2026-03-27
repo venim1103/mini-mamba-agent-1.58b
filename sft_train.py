@@ -24,7 +24,7 @@ from transformers import AutoTokenizer
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PRETRAINED_CKPT = "checkpoints/bitmamba_parent/step_1000000.pt" 
 CHECKPOINT_DIR = "checkpoints/sft"
-MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2)
+MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2, use_checkpoint=True)
 
 BATCH_SIZE = 2
 GRAD_ACCUM_STEPS = 8
