@@ -195,12 +195,7 @@ log_probs = -F.cross_entropy(logits[0, input_ids.shape[1]-1 : -1, :].contiguous(
 
 This wastes GBs of VRAM during RL training.
 
-**The Fix:** Use `forward_hidden` to get hidden states, slice only the completion portion, and project only that:
-```python
-hidden = model.forward_hidden(full_seq, seq_idx=None)
-hidden_slice = hidden[0:1, input_ids.shape[1]-1 : -1, :]  # only completion tokens
-logits = model.output(hidden_slice)  # projects only completion tokens to vocab
-```
+**Status:** ✅ Fixed - Changed to use `forward_hidden` + `model.output` to only project completion tokens.
 
 ---
 
@@ -218,13 +213,7 @@ loss = F.cross_entropy(
 
 **The Issue:** With context length 4096 and BS=2, materializing full logits takes ~2GB of VRAM that could easily be saved.
 
-**The Fix:** Use `forward_hidden` + `chunked_cross_entropy` in sft_train.py:
-```python
-hidden = model.forward_hidden(x, seq_idx=None)
-loss = chunked_cross_entropy(hidden, model.output, y[..., 1:], ignore_index=-100) / GRAD_ACCUM_STEPS
-```
-
-**Note:** The `chunked_cross_entropy` function needs to be updated to accept an `ignore_index` parameter.
+**Status:** ✅ Fixed - Updated sft_train.py to use `forward_hidden` + `chunked_cross_entropy` with `ignore_index`.
 
 ---
 
@@ -240,11 +229,7 @@ self.output.weight = self.tok_embeddings.weight  # weight tying
 
 The gradients flowing back from the cross-entropy loss treat the weights as ternary (via the STE quantizer), but the gradients flowing back from the input embedding treat them as continuous. They will "fight" each other during optimizer updates.
 
-**The Fix:** At the 500M parameter scale, untying the weights to avoid optimization instability:
-```python
-self.output = BitLinear(dim, vocab_size, bias=False)
-# Remove: self.output.weight = self.tok_embeddings.weight
-```
+**Status:** ✅ Fixed - Untying weights by removing `self.output.weight = self.tok_embeddings.weight`.
 
 ---
 
@@ -266,15 +251,7 @@ for opt in [muon_opt, adam_opt, mamba_opt]:
 
 **The Issue:** Moving tensors between devices inside dictionaries does not always free the original GPU memory immediately due to PyTorch's caching allocator, and repeatedly doing this every batch causes fragmentation. The generation phase may not actually use the freed VRAM because the allocator hasn't released the blocks.
 
-**The Fix:** Call `torch.cuda.empty_cache()` immediately after moving the states to the CPU, right before `model.generate()`:
-```python
-for opt in [muon_opt, adam_opt, mamba_opt]:
-    for state in opt.state.values():
-        for k, v in state.items():
-            if isinstance(v, torch.Tensor): state[k] = v.cpu()
-torch.cuda.empty_cache()  # Force release of freed GPU blocks
-# ... generation ...
-```
+**Status:** ✅ Fixed - Added `torch.cuda.empty_cache()` after offloading optimizer states to CPU.
 
 ---
 
@@ -282,17 +259,7 @@ torch.cuda.empty_cache()  # Force release of freed GPU blocks
 
 The `chunked_cross_entropy` function is used for pre-training where there's no padding token, but SFT requires `ignore_index=-100` for proper label padding handling.
 
-**The Fix:** Update `chunked_cross_entropy` to accept and pass through `ignore_index`:
-```python
-def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024, ignore_index=-100):
-    ...
-    total_loss += F.cross_entropy(
-        chunk_logits.reshape(-1, chunk_logits.size(-1)),
-        chunk_targets,
-        reduction='sum',
-        ignore_index=ignore_index,  # Add this
-    )
-```
+**Status:** ✅ Fixed - Added `ignore_index` parameter to `chunked_cross_entropy` function.
 
 
 ---
