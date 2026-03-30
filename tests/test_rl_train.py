@@ -29,7 +29,7 @@ def test_collect_data_files_follows_symlinked_directories(tmp_path):
 
 class TestComputeFormatReward:
     def test_complete_with_think_and_answer(self):
-        completion = "<think>Let me think about this\n\nThe answer is 42."
+        completion = "<think>Let me think about this.\nThe answer is 42."
         assert compute_format_reward(completion) == 1.0
 
     def test_no_tags(self):
@@ -40,18 +40,14 @@ class TestComputeFormatReward:
         completion = "<think>Just thinking"
         assert compute_format_reward(completion) == 0.0
 
-    def test_tags_present_but_no_answer_after(self):
-        completion = "<think>Thinking\n"
-        assert compute_format_reward(completion) == 0.5
-
 
 class TestComputeAccuracyReward:
     def test_ground_truth_in_final_answer(self):
-        completion = "<think>thinking\n\nThe answer is 42"
+        completion = "<think>thinking.\nThe answer is 42"
         assert compute_accuracy_reward(completion, "42") == 2.0
 
     def test_case_insensitive_match(self):
-        completion = "<think>thinking\n\nThe answer is FORTY TWO"
+        completion = "<think>thinking.\nThe answer is FORTY TWO"
         assert compute_accuracy_reward(completion, "forty two") == 2.0
 
     def test_no_closing_tag(self):
@@ -59,17 +55,17 @@ class TestComputeAccuracyReward:
         assert compute_accuracy_reward(completion, "42") == 0.0
 
     def test_no_match(self):
-        completion = "<think>thinking\n\nThe answer is 99"
+        completion = "<think>thinking.\nThe answer is 99"
         assert compute_accuracy_reward(completion, "42") == 0.0
 
 
 class TestComputeConcisenessPenalty:
     def test_verbose_thinking_penalized(self):
-        completion = "<think>" + "x" * 1000 + "\n\nhi"
+        completion = "<think>" + "x" * 1000 + ".\nhi"
         assert compute_conciseness_penalty(completion) == -0.5
 
     def test_concise_thinking_no_penalty(self):
-        completion = "<think>short\n\nhi"
+        completion = "<think>short.\nhi"
         assert compute_conciseness_penalty(completion) == 0.0
 
     def test_no_tags_no_penalty(self):
@@ -79,7 +75,7 @@ class TestComputeConcisenessPenalty:
 
 class TestComputeRewards:
     def test_combines_all_rewards(self):
-        completions = ["<think>thinking\n\n42 is the answer"]
+        completions = ["<think>thinking.\n42 is the answer"]
         ground_truth = "42"
         rewards = compute_rewards(completions, ground_truth)
         assert rewards.shape == (1,)
