@@ -1,5 +1,7 @@
 # Mini Mamba Agent 1.58b
 
+[![Coverage HTML Report](https://img.shields.io/badge/Coverage-HTML%20Report-0a7ea4?logo=github&logoColor=white)](https://venim1103.github.io/mini-mamba-agent-1.58b/)
+
 This repository contains a PyTorch pipeline for training a BitMamba Small Language Model (SLM) optimized for reasoning, logic, and tool-use, all constrained to fit on a single 12GB–24GB consumer GPU (e.g., RTX 3060 to RTX 3090/4090).
 
 Rather than relying on quadratic Self-Attention, which limits context windows and crushes consumer hardware, this architecture merges the linear-time sequence modeling of the Mamba-2 architecture with the extreme parameter efficiency of the BitNet b1.58 paradigm.
@@ -159,7 +161,8 @@ pip install mamba-ssm
 This repo includes a GitHub Actions workflow at `.github/workflows/coverage-pages.yml` that:
 
 - runs tests with coverage on each PR
-- publishes the HTML report (`htmlcov/`) to GitHub Pages on pushes to `main`
+- uploads the HTML report (`htmlcov/`) as an artifact on each push/PR run
+- publishes to GitHub Pages only when manually triggered from the Actions tab on `main`
 
 After enabling Pages once in your GitHub repo settings, anyone can open the latest public report at:
 
