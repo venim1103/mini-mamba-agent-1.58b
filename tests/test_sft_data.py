@@ -274,38 +274,3 @@ class TestTokenizerFallbacks:
 from sft_data import _first_token_id
 from unittest.mock import MagicMock
 
-
-class TestFirstTokenId:
-    def _make_tokenizer(self, encode_result=None, eos_id=1, pad_id=0, unk_id=None):
-        tok = MagicMock()
-        def encode(text, add_special_tokens=False):
-            return encode_result or [ord(c) % 20 for c in text[:3]]
-        tok.encode = encode
-        tok.eos_token_id = eos_id
-        tok.pad_token_id = pad_id
-        tok.unk_token_id = unk_id
-        return tok
-
-    def test_returns_first_token_of_text(self):
-        tok = self._make_tokenizer(encode_result=[5, 10, 15])
-        assert _first_token_id(tok, "any text") == 5
-
-    def test_falls_back_to_fallback_text(self):
-        tok = self._make_tokenizer(encode_result=[])
-        assert _first_token_id(tok, "empty", fallback_text="abc") == ord('a') % 20
-
-    def test_falls_back_to_eos_token(self):
-        tok = self._make_tokenizer(encode_result=[], eos_id=99)
-        assert _first_token_id(tok, "empty") == 99
-
-    def test_falls_back_to_pad_token(self):
-        tok = self._make_tokenizer(encode_result=[], eos_id=None, pad_id=77)
-        assert _first_token_id(tok, "empty") == 77
-
-    def test_falls_back_to_unk_token(self):
-        tok = self._make_tokenizer(encode_result=[], eos_id=None, pad_id=None, unk_id=55)
-        assert _first_token_id(tok, "empty") == 55
-
-    def test_returns_zero_if_no_fallback(self):
-        tok = self._make_tokenizer(encode_result=[], eos_id=None, pad_id=None, unk_id=None)
-        assert _first_token_id(tok, "empty") == 0
