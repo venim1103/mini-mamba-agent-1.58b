@@ -1,6 +1,3 @@
-# tests/test_data.py
-"""Unit tests for data.py — token packing, collation, and dataset mixture."""
-
 import pytest
 import torch
 
