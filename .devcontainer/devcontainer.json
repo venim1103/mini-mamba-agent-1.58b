@@ -19,7 +19,10 @@
     "source=mini-mamba-conda-pkgs,target=/opt/conda/pkgs,type=volume"
   ],
   "containerEnv": {
-    "REQUESTS_CA_BUNDLE": "/etc/ssl/certs/ca-certificates.crt"
+    "REQUESTS_CA_BUNDLE": "/etc/ssl/certs/ca-certificates.crt",
+    "XDG_CACHE_HOME": "/home/vscode/.cache",
+    "HF_HOME": "/home/vscode/.cache/huggingface",
+    "PIP_CACHE_DIR": "/home/vscode/.cache/pip"
   },
   "features": {},
   "customizations": {

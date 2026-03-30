@@ -64,6 +64,11 @@ RUN set -eux; \
     fi; \
     user_group="$(id -gn "${USERNAME}")"; \
     chown -R "${USERNAME}:${user_group}" "${CONDA_DIR}"; \
+    mkdir -p "/home/${USERNAME}/.cache/huggingface" "/home/${USERNAME}/.cache/pip" \
+            "/home/${USERNAME}/.config" "/home/${USERNAME}/.conda"; \
+    chown -R "${USERNAME}:${user_group}" "/home/${USERNAME}/.cache" \
+                                         "/home/${USERNAME}/.config" \
+                                         "/home/${USERNAME}/.conda"; \
     printf '#!/bin/sh\nif [ -f /opt/conda/etc/profile.d/conda.sh ]; then\n    . /opt/conda/etc/profile.d/conda.sh\n    conda activate ai 2>/dev/null\nfi\n' > /etc/profile.d/conda-ai.sh; \
     chmod +x /etc/profile.d/conda-ai.sh; \
     printf '\n# Auto-activate ai conda environment\nif [ -f /opt/conda/etc/profile.d/conda.sh ]; then\n    . /opt/conda/etc/profile.d/conda.sh\n    conda activate ai >/dev/null 2>&1 || true\nfi\n' >> /etc/bash.bashrc; \
