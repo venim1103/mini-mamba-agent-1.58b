@@ -8,7 +8,66 @@ from data import (
     packed_token_stream,
     packed_collate_fn,
     AgenticDataMixture,
+    get_text_column,
+    create_infinite_stream,
 )
+
+
+# ---------------------------------------------------------------------------
+# get_text_column
+# ---------------------------------------------------------------------------
+
+class TestGetTextColumn:
+    def test_finds_text_column(self):
+        stream = [{"text": "hello"}]
+        assert get_text_column(iter(stream)) == "text"
+
+    def test_finds_content_column(self):
+        stream = [{"content": "hello"}]
+        assert get_text_column(iter(stream)) == "content"
+
+    def test_finds_trajectory_column(self):
+        stream = [{"trajectory": "hello"}]
+        assert get_text_column(iter(stream)) == "trajectory"
+
+    def test_finds_prompt_column(self):
+        stream = [{"prompt": "hello"}]
+        assert get_text_column(iter(stream)) == "prompt"
+
+    def test_finds_response_column(self):
+        stream = [{"response": "hello"}]
+        assert get_text_column(iter(stream)) == "response"
+
+    def test_finds_question_column(self):
+        stream = [{"question": "hello"}]
+        assert get_text_column(iter(stream)) == "question"
+
+    def test_fallback_to_first_string(self):
+        stream = [{"custom_field": "hello"}]
+        assert get_text_column(iter(stream)) == "custom_field"
+
+    def test_raises_on_no_string(self):
+        stream = [{"number": 123}]
+        with pytest.raises(ValueError):
+            get_text_column(iter(stream))
+
+
+# ---------------------------------------------------------------------------
+# create_infinite_stream
+# ---------------------------------------------------------------------------
+
+class TestCreateInfiniteStream:
+    def test_yields_all_items_then_loops(self):
+        dataset = [{"a": 1}, {"a": 2}, {"a": 3}]
+        stream = create_infinite_stream(dataset)
+        items = [next(stream)["a"] for _ in range(7)]
+        assert items == [1, 2, 3, 1, 2, 3, 1]
+
+    def test_infinite_iterator_never_exhausts(self):
+        dataset = [{"x": 1}]
+        stream = create_infinite_stream(dataset)
+        for _ in range(100):
+            next(stream)
 
 
 # ---------------------------------------------------------------------------
