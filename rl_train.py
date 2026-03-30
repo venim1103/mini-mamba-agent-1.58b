@@ -51,19 +51,19 @@ def collect_data_files(root_dir):
 
 def compute_format_reward(completion):
     """Check structural format: <think>...</think> followed by answer."""
-    if "<think>" in completion and "</think>" in completion:
-        parts = completion.split("</think>")
-        if len(parts) >= 2 and parts[-1].strip():
-            return 1.0
-        return 0.5   # tags present but no answer after
-    return 0.0
+    thought_text, final_answer = _extract_thought_and_answer(completion)
+    if thought_text is None:
+        return 0.0
+    if final_answer:
+        return 1.0
+    return 0.5   # tags present but no answer after
 
 
 def compute_accuracy_reward(completion, ground_truth):
-    """Check if the final answer (after </think>) contains the ground truth."""
-    if "</think>" not in completion:
+    """Check if the extracted final answer contains the ground truth."""
+    _, final_answer = _extract_thought_and_answer(completion)
+    if not final_answer:
         return 0.0
-    final_answer = completion.split("</think>")[-1].strip()
     if ground_truth.lower() in final_answer.lower():
         return 2.0
     return 0.0
@@ -71,15 +71,29 @@ def compute_accuracy_reward(completion, ground_truth):
 
 def compute_conciseness_penalty(completion):
     """Penalize verbose thinking relative to answer length."""
-    if "</think>" not in completion:
+    thought_text, final_answer = _extract_thought_and_answer(completion)
+    if not thought_text or not final_answer:
         return 0.0
-    parts = completion.split("</think>")
-    thought_text = parts[0].replace("<think>", "").strip()
-    final_answer = parts[-1].strip()
     thought_ratio = len(thought_text) / max(1, len(final_answer))
     if thought_ratio > 10.0:
         return -0.5
     return 0.0
+
+
+def _extract_thought_and_answer(completion):
+    """Extract thought and final answer from strict <think>...</think> format."""
+    if "<think>" not in completion:
+        return None, None
+
+    after_open = completion.split("<think>", 1)[1]
+
+    if "</think>" not in after_open:
+        return None, None
+
+    thought_text, answer_part = after_open.split("</think>", 1)
+    thought_text = thought_text.strip()
+    final_answer = answer_part.strip()
+    return thought_text, final_answer
 
 
 def compute_rewards(completions, ground_truth):
