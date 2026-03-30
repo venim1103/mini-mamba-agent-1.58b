@@ -59,7 +59,7 @@ class TestComputeAccuracyReward:
         assert compute_accuracy_reward(completion, "42") == 0.0
 
     def test_no_match(self):
-        completion = "<think>thinking.\nThe answer is 99"
+        completion = "<think>thinking.</think>\nThe answer is 99"
         assert compute_accuracy_reward(completion, "42") == 0.0
 
 
@@ -69,7 +69,7 @@ class TestComputeConcisenessPenalty:
         assert compute_conciseness_penalty(completion) == -0.5
 
     def test_concise_thinking_no_penalty(self):
-        completion = "<think>short.\nhi"
+        completion = "<think>short.</think>\nhi"
         assert compute_conciseness_penalty(completion) == 0.0
 
     def test_no_tags_no_penalty(self):
