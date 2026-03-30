@@ -154,6 +154,25 @@ pip install causal-conv1d>=1.4.0
 pip install mamba-ssm
 ```
 
+### 1.1 Test Coverage (Public HTML on GitHub Pages)
+
+This repo includes a GitHub Actions workflow at `.github/workflows/coverage-pages.yml` that:
+
+- runs tests with coverage on each PR
+- publishes the HTML report (`htmlcov/`) to GitHub Pages on pushes to `main`
+
+After enabling Pages once in your GitHub repo settings, anyone can open the latest public report at:
+
+`https://<your-github-username>.github.io/<your-repo-name>/`
+
+If you want to run the same report locally:
+
+```bash
+./run_tests.sh
+```
+
+Then open `htmlcov/index.html`.
+
 ### 2. Build the Custom Tokenizer
 
 Generate the 64k mathematical vocabulary strictly from your local `train/` data:
