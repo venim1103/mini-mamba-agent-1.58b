@@ -14,7 +14,7 @@
 
 import torch
 from transformers import AutoTokenizer
-from model import BitMambaLLM
+from model import BitMambaLLM, maybe_autocast
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -35,7 +35,7 @@ def generate(model, tokenizer, prompt, max_new_tokens=150, temperature=0.7):
     print(f"\nPrompt: {prompt}")
     print("Generating...", flush=True)
     
-    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+    with maybe_autocast(DEVICE):
         output_ids = model.generate(
             input_ids, max_new_tokens=max_new_tokens, temperature=temperature,
             do_sample=True, eos_token_id=eos_id

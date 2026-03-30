@@ -16,13 +16,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-import triton
-import triton.language as tl
+from contextlib import nullcontext
+try:
+    import triton
+    import triton.language as tl
+    HAS_TRITON = True
+except ImportError:
+    triton = None
+    tl = None
+    HAS_TRITON = False
 
 try:
     from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 except ImportError:
-    raise ImportError("Please install mamba-ssm>=2.0: pip install mamba-ssm")
+    mamba_chunk_scan_combined = None
 
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -37,31 +44,122 @@ except ImportError:
 
 from einops import rearrange
 
+
+def maybe_autocast(device=None, amp_dtype=None):
+    if device is None:
+        device_type = "cuda" if torch.cuda.is_available() else "cpu"
+    elif isinstance(device, torch.device):
+        device_type = device.type
+    else:
+        device_type = str(device)
+
+    if device_type != "cuda":
+        return nullcontext()
+
+    if amp_dtype is None:
+        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    elif amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        amp_dtype = torch.float16
+
+    return torch.autocast(device_type="cuda", dtype=amp_dtype)
+
+
+def _mamba_chunk_scan_combined_fallback(
+    x,
+    dt,
+    A,
+    B,
+    C,
+    chunk_size,
+    D,
+    z=None,
+    dt_bias=None,
+    dt_softplus=True,
+    seq_idx=None,
+    return_final_states=False,
+):
+    del chunk_size
+    bsz, seqlen, nheads, headdim = x.shape
+    ngroups = B.shape[2]
+    d_state = B.shape[3]
+
+    heads_per_group = nheads // ngroups
+    Bh = B.repeat_interleave(heads_per_group, dim=2).to(torch.float32)
+    Ch = C.repeat_interleave(heads_per_group, dim=2).to(torch.float32)
+
+    x_f = x.to(torch.float32)
+    dt_f = dt.to(torch.float32)
+    A_f = A.to(torch.float32)
+    D_f = D.to(torch.float32)
+
+    if dt_bias is not None:
+        dt_f = dt_f + dt_bias.to(torch.float32).view(1, 1, -1)
+    if dt_softplus:
+        dt_f = F.softplus(dt_f)
+
+    state = x_f.new_zeros((bsz, nheads, headdim, d_state))
+    outputs = []
+
+    for t in range(seqlen):
+        if seq_idx is not None and t > 0:
+            reset = (seq_idx[:, t] != seq_idx[:, t - 1]).view(bsz, 1, 1, 1)
+            state = torch.where(reset, torch.zeros_like(state), state)
+
+        x_t = x_f[:, t, :, :]
+        dt_t = dt_f[:, t, :]
+        B_t = Bh[:, t, :, :]
+        C_t = Ch[:, t, :, :]
+
+        dA = torch.exp(dt_t * A_f.view(1, -1))
+        dB = dt_t.unsqueeze(-1) * B_t
+
+        state = dA.unsqueeze(-1).unsqueeze(-1) * state + torch.einsum("bhn,bhp->bhpn", dB, x_t)
+        y_t = torch.einsum("bhpn,bhn->bhp", state, C_t) + D_f.view(1, -1, 1) * x_t
+
+        if z is not None:
+            y_t = y_t * F.silu(z[:, t, :, :].to(torch.float32))
+
+        outputs.append(y_t)
+
+    y = torch.stack(outputs, dim=1).to(x.dtype)
+    if return_final_states:
+        return y, state.to(x.dtype)
+    return y
+
+
+if mamba_chunk_scan_combined is None:
+    mamba_chunk_scan_combined = _mamba_chunk_scan_combined_fallback
+
 # ==========================================
 # 1. Custom Triton Kernel for 1.58-bit Weights
 # ==========================================
-@triton.jit
-def _ternary_quant_kernel(w_ptr, output_ptr, n_elements, scale, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    w = tl.load(w_ptr + offsets, mask=mask).to(tl.float32)
-    w_scaled = w / scale
-    # Triton does not expose tl.math.round on all versions; emulate nearest-int rounding.
-    w_quant = tl.where(w_scaled >= 0, tl.floor(w_scaled + 0.5), tl.ceil(w_scaled - 0.5))
-    w_quant = tl.maximum(w_quant, -1.0)
-    w_quant = tl.minimum(w_quant, 1.0)
-    tl.store(output_ptr + offsets, w_quant, mask=mask)
+if HAS_TRITON:
+    @triton.jit
+    def _ternary_quant_kernel(w_ptr, output_ptr, n_elements, scale, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(axis=0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        w = tl.load(w_ptr + offsets, mask=mask).to(tl.float32)
+        w_scaled = w / scale
+        # Triton does not expose tl.math.round on all versions; emulate nearest-int rounding.
+        w_quant = tl.where(w_scaled >= 0, tl.floor(w_scaled + 0.5), tl.ceil(w_scaled - 0.5))
+        w_quant = tl.maximum(w_quant, -1.0)
+        w_quant = tl.minimum(w_quant, 1.0)
+        tl.store(output_ptr + offsets, w_quant, mask=mask)
 
 class TernaryQuantizeSTE(torch.autograd.Function):
     @staticmethod
     def forward(ctx, weight):
         scale = weight.abs().mean().clamp(min=1e-5)
-        output = torch.empty_like(weight)
-        n_elements = weight.numel()
-        grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
-        _ternary_quant_kernel[grid](weight, output, n_elements, scale.item(), BLOCK_SIZE=1024)
-        return output
+        if HAS_TRITON and weight.is_cuda:
+            output = torch.empty_like(weight)
+            n_elements = weight.numel()
+            grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+            _ternary_quant_kernel[grid](weight, output, n_elements, scale.item(), BLOCK_SIZE=1024)
+            return output
+        w_scaled = weight / scale
+        w_quant = torch.where(w_scaled >= 0, torch.floor(w_scaled + 0.5), torch.ceil(w_scaled - 0.5))
+        return torch.clamp(w_quant, -1.0, 1.0)
 
     @staticmethod
     def backward(ctx, grad_output):

@@ -138,9 +138,18 @@ For Windows users who utilize WSL, to get GPU passthrough to work inside Podman 
 
 ### 1. Installation
 
-Clone the repository and install the strict dependencies (including Triton and Mamba-SSM):
+Clone the repository and install the base dependencies for your environment:
 ```bash
-pip install torch transformers datasets wandb triton
+pip install -r requirements-cpu.txt
+```
+
+For CUDA 12.8 environments, install the CUDA overlay instead:
+```bash
+pip install -r requirements-cuda.txt
+```
+
+If you need the full GPU training stack, install the CUDA-specific Mamba dependencies after the CUDA overlay:
+```bash
 pip install causal-conv1d>=1.4.0
 pip install mamba-ssm
 ```

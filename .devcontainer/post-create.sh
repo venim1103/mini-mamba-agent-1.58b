@@ -68,36 +68,36 @@ else
     fi
 fi
 
-echo "==> Installing remaining packages from requirements.txt..."
-# Get requirements.txt path - handle both development and deployment contexts
-if [ -f /workspace/requirements.txt ]; then
+echo "==> Installing remaining packages from requirements files..."
+# Prefer CUDA overlay requirements in devcontainer, then fall back to base requirements.
+if [ -f /workspace/requirements-cuda.txt ]; then
+    REQ_FILE="/workspace/requirements-cuda.txt"
+elif [ -f "$(dirname "$0")/../requirements-cuda.txt" ]; then
+    REQ_FILE="$(dirname "$0")/../requirements-cuda.txt"
+elif [ -f "$(dirname "$0")/../../requirements-cuda.txt" ]; then
+    REQ_FILE="$(dirname "$0")/../../requirements-cuda.txt"
+elif [ -f /workspace/requirements.txt ]; then
     REQ_FILE="/workspace/requirements.txt"
 elif [ -f "$(dirname "$0")/../requirements.txt" ]; then
     REQ_FILE="$(dirname "$0")/../requirements.txt"
 elif [ -f "$(dirname "$0")/../../requirements.txt" ]; then
     REQ_FILE="$(dirname "$0")/../../requirements.txt"
 else
-    echo "WARNING: requirements.txt not found, skipping."
+    echo "WARNING: requirements files not found, skipping."
     REQ_FILE=""
 fi
 
 if [ -n "$REQ_FILE" ] && [ -f "$REQ_FILE" ]; then
-    echo "==> Using requirements.txt: $REQ_FILE"
-    # Filter out torch, triton, mamba-ssm, causal-conv1d (already handled above)
-    # and create a temporary requirements file for the rest
-    TEMP_REQ=$(mktemp)
-    grep -vE "^(torch|triton|mamba-ssm|causal-conv1d)" "$REQ_FILE" > "$TEMP_REQ"
-    
-    if $PIP install -r "$TEMP_REQ"; then
+    echo "==> Using requirements file: $REQ_FILE"
+    if $PIP install -r "$REQ_FILE"; then
         echo "==> Requirements installed successfully."
     else
         echo "==> Some requirements failed, trying conda-forge fallback..."
         # Try conda-forge for common packages that might fail pip
         $CONDA install -n ai -y -c conda-forge transformers datasets wandb einops accelerate 2>/dev/null || true
     fi
-    rm -f "$TEMP_REQ"
 else
-    echo "==> requirements.txt not found, falling back to manual package install..."
+    echo "==> requirements files not found, falling back to manual package install..."
     if $PIP install transformers datasets wandb bitsandbytes einops accelerate; then
         echo "==> Packages installed from PyPI."
     else

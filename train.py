@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import os
 import time
 import wandb
-from model import BitMambaLLM, chunked_cross_entropy
+from model import BitMambaLLM, chunked_cross_entropy, maybe_autocast
 from data import create_dataloaders
 from optim import setup_mamba_optimizers, FGWSD_Scheduler
 
@@ -169,7 +169,7 @@ def main():
     previous_ctx = initial_ctx
     previous_phase = "Phase_1"  # Track phase changes for FG-WSD data quality progression
     # G10: GradScaler for FP16 (no-op when using BF16)
-    scaler = torch.amp.GradScaler(enabled=(AMP_DTYPE == torch.float16))
+    scaler = torch.amp.GradScaler(enabled=(DEVICE == "cuda" and AMP_DTYPE == torch.float16))
     
     for step in range(TOTAL_STEPS):
         current_lr, current_ctx, phase_name = scheduler.step(step)
@@ -205,7 +205,7 @@ def main():
             x, y = x.to(DEVICE)[:, :current_ctx], y.to(DEVICE)[:, :current_ctx]
             seq_idx = create_seq_idx_batch(cu_seqlens, n_segs, current_ctx)
             
-            with torch.autocast(device_type='cuda', dtype=AMP_DTYPE):
+            with maybe_autocast(DEVICE, amp_dtype=AMP_DTYPE):
                 # G2: Chunked cross-entropy avoids materializing full [BS, ctx, vocab] logits
                 hidden = model.forward_hidden(x, seq_idx=seq_idx)
                 loss = chunked_cross_entropy(hidden, model.output, y) / GRAD_ACCUM_STEPS

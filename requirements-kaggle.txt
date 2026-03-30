@@ -1,0 +1,7 @@
+# Kaggle environment: torch/triton/CUDA are pre-installed by the platform.
+# This file only adds the packages that Kaggle does not provide.
+# Do NOT add torch, torchvision, torchaudio, or triton here.
+-r requirements.txt
+causal-conv1d>=1.4.0
+mamba-ssm
+bitsandbytes

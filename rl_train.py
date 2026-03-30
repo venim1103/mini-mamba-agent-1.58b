@@ -18,7 +18,7 @@ import os
 import wandb
 from datasets import load_dataset
 from transformers import AutoTokenizer
-from model import BitMambaLLM
+from model import BitMambaLLM, maybe_autocast
 from optim import setup_mamba_optimizers
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -200,11 +200,12 @@ def main():
             input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(DEVICE)
             
             # G6: Offload optimizer states to CPU during generation (~1.65GB savings)
-            for opt in [muon_opt, adam_opt, mamba_opt]:
-                for state in opt.state.values():
-                    for k, v in state.items():
-                        if isinstance(v, torch.Tensor): state[k] = v.cpu()
-            torch.cuda.empty_cache()  # Force release of freed GPU blocks
+            if DEVICE == "cuda":
+                for opt in [muon_opt, adam_opt, mamba_opt]:
+                    for state in opt.state.values():
+                        for k, v in state.items():
+                            if isinstance(v, torch.Tensor): state[k] = v.cpu()
+                torch.cuda.empty_cache()  # Force release of freed GPU blocks
             
             # Generate GROUP_SIZE completions
             model.eval()
@@ -219,7 +220,7 @@ def main():
                     
                     # Capture old_log_probs for PPO epsilon clipping
                     full_seq = torch.cat([input_ids[0], gen_only]).unsqueeze(0)
-                    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    with maybe_autocast(DEVICE):
                         hidden = model.forward_hidden(full_seq, seq_idx=None)
                         hidden_slice = hidden[0:1, input_ids.shape[1]-1:-1, :]
                         logits = model.output(hidden_slice)
@@ -233,10 +234,11 @@ def main():
             advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
             
             # G6: Restore optimizer states from CPU back to GPU
-            for opt in [muon_opt, adam_opt, mamba_opt]:
-                for state in opt.state.values():
-                    for k, v in state.items():
-                        if isinstance(v, torch.Tensor): state[k] = v.cuda()
+            if DEVICE == "cuda":
+                for opt in [muon_opt, adam_opt, mamba_opt]:
+                    for state in opt.state.values():
+                        for k, v in state.items():
+                            if isinstance(v, torch.Tensor): state[k] = v.to(DEVICE)
             
             # GRPO policy gradient step with PPO epsilon clipping
             model.train()
@@ -249,7 +251,7 @@ def main():
                 old_log_probs = old_log_probs_list[i].to(DEVICE)
                 
                 full_seq = torch.cat([input_ids[0], comp_ids]).unsqueeze(0)
-                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                with maybe_autocast(DEVICE):
                     hidden = model.forward_hidden(full_seq, seq_idx=None)
                     hidden_slice = hidden[0:1, input_ids.shape[1]-1:-1, :]
                     logits = model.output(hidden_slice)
