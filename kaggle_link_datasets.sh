@@ -12,8 +12,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# Create local directories
-mkdir -p local_data/train/web
+
+# ==========================================
+# 1. KAGGLE ENVIRONMENT CHECK
+# ==========================================
+# Check for Kaggle's specific environment variables or root folders
+if [[ -z "${KAGGLE_KERNEL_RUN_TYPE}" ]] && [[ ! -d "/kaggle/input" ]]; then
+    echo "Not running in a Kaggle environment. Skipping Kaggle dataset linking."
+    exit 0
+fi
+
+echo "Kaggle environment detected. Preparing data directories..."
+
+# ==========================================
+# 2. CREATE DIRECTORIES & SYMLINKS
+# ==========================================
+# Clean slate just in case
+rm -rf local_data
+
+# Make the EXACT folders your data.py DATA_WEIGHTS dictionary expects
+mkdir -p local_data/train/web/fineweb
 mkdir -p local_data/train/logic/numinamath-cot
 mkdir -p local_data/train/logic/fldx2
 mkdir -p local_data/train/code/tiny-codes
@@ -27,24 +45,47 @@ mkdir -p local_data/sft/tool_calling/apigen-fc
 mkdir -p local_data/sft/tool_calling/xlam-irrelevance
 mkdir -p local_data/rl/reasoning
 
-# Symlink Pre-Train Smalls
-ln -s /kaggle/input/mini-mamba-1b58-pretrain-smalls/logic/numinamath/* local_data/train/logic/numinamath-cot/
-ln -s /kaggle/input/mini-mamba-1b58-pretrain-smalls/logic/fldx2/* local_data/train/logic/fldx2/
-ln -s /kaggle/input/mini-mamba-1b58-pretrain-smalls/code/tiny-codes/* local_data/train/code/tiny-codes/
-ln -s /kaggle/input/mini-mamba-1b58-pretrain-smalls/tools/toolformer/* local_data/train/tools/toolformer/
+# Hunt down every .parquet/.jsonl file and link them straight into the flat target folders!
+echo "Symlinking Pre-train Smalls..."
+find /kaggle/input/mini-mamba-1b58-pretrain-smalls/logic/numinamath -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/train/logic/numinamath-cot/ \; 2>/dev/null
+find /kaggle/input/mini-mamba-1b58-pretrain-smalls/logic/fldx2 -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/train/logic/fldx2/ \; 2>/dev/null
+find /kaggle/input/mini-mamba-1b58-pretrain-smalls/code/tiny-codes -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/train/code/tiny-codes/ \; 2>/dev/null
+find /kaggle/input/mini-mamba-1b58-pretrain-smalls/tools/toolformer -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/train/tools/toolformer/ \; 2>/dev/null
 
-# Symlink FineWeb-Edu 10BT
-ln -s /kaggle/input/mini-mamba-1b58-fineweb-edu-10bt/web/fineweb/* local_data/train/web/
+echo "Symlinking FineWeb..."
+find /kaggle/input/mini-mamba-1b58-fineweb-edu-10bt/web/fineweb -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/train/web/fineweb/ \; 2>/dev/null
 
-# Symlink SFT Data
-ln -s /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/open-math/* local_data/sft/reasoning/open-math-reasoning/
-ln -s /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/nemotron/* local_data/sft/reasoning/nemotron-post-training/
-ln -s /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/openr1/* local_data/sft/reasoning/openr1-math/
-ln -s /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/smoltalk/* local_data/sft/mixed/smol-smoltalk/
-ln -s /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/apigen/* local_data/sft/tool_calling/apigen-fc/
-ln -s /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/xlam/* local_data/sft/tool_calling/xlam-irrelevance/
+echo "Symlinking SFT & RL Datasets..."
+find /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/open-math -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/sft/reasoning/open-math-reasoning/ \; 2>/dev/null
+find /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/nemotron -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/sft/reasoning/nemotron-post-training/ \; 2>/dev/null
+find /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/openr1 -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/sft/reasoning/openr1-math/ \; 2>/dev/null
+find /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/smoltalk -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/sft/mixed/smol-smoltalk/ \; 2>/dev/null
+find /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/apigen -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/sft/tool_calling/apigen-fc/ \; 2>/dev/null
+find /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/xlam -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/sft/tool_calling/xlam-irrelevance/ \; 2>/dev/null
 
-# Symlink RL Data
-ln -s /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/open-math/* local_data/rl/reasoning/
+# Link RL reasoning to the same SFT math source
+find /kaggle/input/mini-mamba-1b58-sft-rl-data/sft/open-math -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/rl/reasoning/ \; 2>/dev/null
 
-echo "Symlinks created successfully! Data is ready."
+# ==========================================
+# 3. SAFETY VALIDATION
+# ==========================================
+echo "Validating data structure and symlinks..."
+
+if [[ ! -d "local_data" ]]; then
+    echo "ERROR: local_data directory was not created."
+    exit 1
+fi
+
+# The -L flag forces 'find' to follow symlinks. If a symlink is broken, it won't count it.
+FILE_COUNT=$(find -L local_data -type f \( -name "*.parquet" -o -name "*.jsonl" \) 2>/dev/null | wc -l)
+
+if [[ "$FILE_COUNT" -eq 0 ]]; then
+    echo "   ERROR: No .parquet or .jsonl files found in local_data!"
+    echo "   This usually means the Kaggle Datasets aren't attached to this notebook,"
+    echo "   or the dataset folder names in /kaggle/input/ don't match the script."
+    exit 1
+else
+    echo "Success! Found $FILE_COUNT valid data files perfectly linked."
+    echo "Sample of linked files:"
+    find -L local_data -type f \( -name "*.parquet" -o -name "*.jsonl" \) 2>/dev/null | head -n 3
+fi
