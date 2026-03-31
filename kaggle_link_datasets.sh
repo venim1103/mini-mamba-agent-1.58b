@@ -52,7 +52,7 @@ find /kaggle/input/datasets/venim1103/mini-mamba-1b58-pretrain-smalls/code/tiny-
 find /kaggle/input/datasets/venim1103/mini-mamba-1b58-pretrain-smalls/tools/toolformer -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/train/tools/toolformer/ \; 2>/dev/null
 
 echo "Symlinking FineWeb..."
-find /kaggle/input/datasets/venim1103/mini-mamba-1b58-fineweb-edu-10bt/web/fineweb -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/train/web/fineweb/ \; 2>/dev/null
+find /kaggle/input/datasets/venim1103/mini-mamba-1b58-fineweb-edu-10bt -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/train/web/fineweb/ \; 2>/dev/null
 
 echo "Symlinking SFT & RL Datasets..."
 find /kaggle/input/datasets/venim1103/mini-mamba-1b58-sft-rl-data/sft/open-math -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/sft/reasoning/open-math-reasoning/ \; 2>/dev/null
