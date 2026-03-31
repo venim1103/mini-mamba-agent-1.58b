@@ -184,6 +184,19 @@ Generate the 64k mathematical vocabulary strictly from your local `train/` data:
 python train_tokenizer.py
 ```
 
+The tokenizer trainer now streams local `.jsonl`, `.json`, and `.parquet` files with a bounded in-memory buffer instead of collecting large chunks of the corpus in RAM. If you are on a smaller machine, lower the buffer further:
+
+```bash
+TOKENIZER_MAX_BATCH_EXAMPLES=32 TOKENIZER_MAX_BATCH_CHARACTERS=500000 python train_tokenizer.py
+```
+
+Optional controls:
+
+- `TOKENIZER_MAX_BATCH_EXAMPLES`: max number of documents held in memory before flushing to the trainer
+- `TOKENIZER_MAX_BATCH_CHARACTERS`: max total characters held in memory before flushing to the trainer
+- `TOKENIZER_PARQUET_BATCH_SIZE`: rows read at a time from parquet files
+- `TOKENIZER_MAX_TEXT_CHARACTERS`: optional per-document truncation limit, disabled by default
+
 ### 3. Launch Phase 1 (Pre-Training)
 
 Log in to Weights & Biases (`wandb login`), then choose a mode via env var (`scout`, `parent`, `upscaled`):
