@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
 import json
 import os
 
@@ -36,7 +37,24 @@ OUTPUT_DIR = "custom_agentic_tokenizer"
 MAX_BATCH_EXAMPLES = int(os.getenv("TOKENIZER_MAX_BATCH_EXAMPLES", "128"))
 MAX_BATCH_CHARACTERS = int(os.getenv("TOKENIZER_MAX_BATCH_CHARACTERS", "2000000"))
 PARQUET_BATCH_SIZE = int(os.getenv("TOKENIZER_PARQUET_BATCH_SIZE", "256"))
-MAX_TEXT_CHARACTERS = int(os.getenv("TOKENIZER_MAX_TEXT_CHARACTERS", "0"))
+MAX_TEXT_CHARACTERS = int(os.getenv("TOKENIZER_MAX_TEXT_CHARACTERS", "2000"))
+MIN_FREQUENCY = int(os.getenv("TOKENIZER_MIN_FREQUENCY", "3"))
+# Target unique word count that fits in RAM.  Each unique word costs ~15-20 KB
+# in the Rust BPE trainer (word string + character-level tokenisation + pair
+# counts + priority queue entries).  800K words ≈ 12-16 GB peak RAM.
+MAX_UNIQUE_WORDS = int(os.getenv("TOKENIZER_MAX_UNIQUE_WORDS", "800000"))
+
+def _corpus_bytes_for_ram(ram_gb):
+    """Return a generous corpus byte cap as a first-pass limit.
+
+    This is a coarse outer bound; the real memory control is
+    MAX_UNIQUE_WORDS which is enforced by the two-pass approach.
+    """
+    usable = max(ram_gb - 4, 0.5)
+    return int(usable * 1_073_741_824)  # 1x — generous, since pass-2 filters
+
+MAX_RAM_GB = float(os.getenv("TOKENIZER_MAX_RAM_GB", "30"))
+MAX_CORPUS_BYTES = _corpus_bytes_for_ram(MAX_RAM_GB)
 
 # These must be preserved as single tokens so the model can reason and format perfectly!
 SPECIAL_TOKENS = [
@@ -155,43 +173,204 @@ def iter_file_texts(file_path):
 def batch_iterator(max_batch_examples=MAX_BATCH_EXAMPLES, max_batch_characters=MAX_BATCH_CHARACTERS):
     """
     Streams local data files with bounded buffering so RAM usage stays stable.
+    Stops after MAX_CORPUS_BYTES total text has been fed to the trainer so
+    the Rust BPE word-frequency map does not exhaust system memory.
     """
     print(f"Scanning {DATA_DIR} for datasets...")
+    corpus_limit = MAX_CORPUS_BYTES
+    print(f"RAM budget: {MAX_RAM_GB:.0f} GB -> corpus cap: "
+          f"{corpus_limit / 1_073_741_824:.1f} GB  "
+          f"(set TOKENIZER_MAX_RAM_GB to change)")
 
     batch = []
     batch_characters = 0
+    total_bytes = 0
 
     for file_path in iter_data_files():
         for text in iter_file_texts(file_path):
+            text_bytes = len(text.encode("utf-8", errors="replace"))
             batch.append(text)
             batch_characters += len(text)
+            total_bytes += text_bytes
 
             if len(batch) >= max_batch_examples or batch_characters >= max_batch_characters:
                 yield batch
                 batch = []
                 batch_characters = 0
 
+            if total_bytes >= corpus_limit:
+                if batch:
+                    yield batch
+                print(f"Reached corpus cap ({total_bytes / 1_073_741_824:.2f} GB). "
+                      f"Stopping data feed.")
+                return
+
     if batch:
         yield batch
+    print(f"All data consumed ({total_bytes / 1_073_741_824:.2f} GB).")
 
 # ==========================================
-# 3. Training Execution
+# 3. Two-Pass Training
 # ==========================================
+def _prune_counter(word_counts, target_size):
+    """Remove low-frequency words until the counter is at or below target_size."""
+    min_count = 2
+    while len(word_counts) > target_size:
+        word_counts = collections.Counter(
+            {w: c for w, c in word_counts.items() if c >= min_count}
+        )
+        min_count += 1
+    return word_counts, min_count - 1
+
+
+def _count_word_frequencies(tokenizer):
+    """Pass 1: stream all data, pre-tokenize, count word frequencies.
+
+    Uses the template tokenizer's pre-tokenizer (the DeepSeek code-regex
+    rules) so the word splits match exactly what the BPE trainer will see.
+
+    To keep memory bounded, the counter is periodically pruned: when it
+    exceeds 3× MAX_UNIQUE_WORDS, low-frequency words are evicted until
+    it is back to 2× MAX_UNIQUE_WORDS.  This means only genuinely
+    frequent words survive, which is exactly what we want.
+    """
+    pre_tokenizer = tokenizer.backend_tokenizer.pre_tokenizer
+    word_counts = collections.Counter()
+    total_bytes = 0
+    corpus_limit = MAX_CORPUS_BYTES
+    prune_trigger = MAX_UNIQUE_WORDS * 3
+    prune_target = MAX_UNIQUE_WORDS * 2
+    prune_count = 0
+
+    print(f"Pass 1 — counting word frequencies (corpus cap: "
+          f"{corpus_limit / 1_073_741_824:.1f} GB, "
+          f"prune at {prune_trigger:,} unique words)...")
+
+    for file_path in iter_data_files():
+        for text in iter_file_texts(file_path):
+            text_bytes = len(text.encode("utf-8", errors="replace"))
+            total_bytes += text_bytes
+
+            for word, _span in pre_tokenizer.pre_tokenize_str(text):
+                word_counts[word] += 1
+
+            if len(word_counts) > prune_trigger:
+                word_counts, threshold = _prune_counter(word_counts, prune_target)
+                prune_count += 1
+                print(f"  Pruned to {len(word_counts):,} words "
+                      f"(dropped count<{threshold}, "
+                      f"{total_bytes / 1_073_741_824:.2f} GB so far)")
+
+            if total_bytes >= corpus_limit:
+                print(f"Reached corpus cap ({total_bytes / 1_073_741_824:.2f} GB). "
+                      f"Stopping pass 1.")
+                break
+        else:
+            continue
+        break
+
+    print(f"Pass 1 done: {len(word_counts):,} unique words from "
+          f"{total_bytes / 1_073_741_824:.2f} GB of text "
+          f"({prune_count} prune cycles).")
+    return word_counts
+
+
+def _build_allowed_words(word_counts):
+    """Select the top words by frequency, capped at MAX_UNIQUE_WORDS.
+
+    First filters by MIN_FREQUENCY, then takes the most common words up
+    to MAX_UNIQUE_WORDS.  Returns a frozenset for O(1) lookup in pass 2.
+    """
+    frequent = {w for w, c in word_counts.items() if c >= MIN_FREQUENCY}
+    print(f"After min_frequency={MIN_FREQUENCY} filter: {len(frequent):,} words "
+          f"(dropped {len(word_counts) - len(frequent):,} rare words).")
+
+    if len(frequent) <= MAX_UNIQUE_WORDS:
+        print(f"Within MAX_UNIQUE_WORDS={MAX_UNIQUE_WORDS:,} limit.")
+        return frozenset(frequent)
+
+    # Keep only the most frequent words
+    top_words = {w for w, _ in word_counts.most_common(MAX_UNIQUE_WORDS) if w in frequent}
+    print(f"Trimmed to top {len(top_words):,} words by frequency.")
+    return frozenset(top_words)
+
+
+def _filtered_batch_iterator(tokenizer, allowed_words):
+    """Pass 2: stream data again, but replace rare words with a space.
+
+    The BPE trainer will only see the allowed words, keeping unique-word
+    count bounded regardless of corpus size or diversity.
+    """
+    pre_tokenizer = tokenizer.backend_tokenizer.pre_tokenizer
+    total_bytes = 0
+    corpus_limit = MAX_CORPUS_BYTES
+
+    print(f"\nPass 2 — streaming filtered text to BPE trainer "
+          f"({len(allowed_words):,} allowed words)...")
+
+    batch = []
+    batch_characters = 0
+
+    for file_path in iter_data_files():
+        for text in iter_file_texts(file_path):
+            text_bytes = len(text.encode("utf-8", errors="replace"))
+            total_bytes += text_bytes
+
+            # Reconstruct text keeping only allowed words
+            parts = []
+            for word, (start, end) in pre_tokenizer.pre_tokenize_str(text):
+                if word in allowed_words:
+                    parts.append(text[start:end])
+            if not parts:
+                continue
+
+            filtered_text = "".join(parts)
+            batch.append(filtered_text)
+            batch_characters += len(filtered_text)
+
+            if len(batch) >= MAX_BATCH_EXAMPLES or batch_characters >= MAX_BATCH_CHARACTERS:
+                yield batch
+                batch = []
+                batch_characters = 0
+
+            if total_bytes >= corpus_limit:
+                if batch:
+                    yield batch
+                print(f"Reached corpus cap ({total_bytes / 1_073_741_824:.2f} GB). "
+                      f"Stopping pass 2.")
+                return
+
+    if batch:
+        yield batch
+    print(f"Pass 2 done ({total_bytes / 1_073_741_824:.2f} GB).")
+
+
 def main():
     print(f"Loading template tokenizer ({TEMPLATE_TOKENIZER})...")
-    # Load the base tokenizer to inherit its underlying BPE structure and code-regex rules
     old_tokenizer = AutoTokenizer.from_pretrained(TEMPLATE_TOKENIZER)
-    
+
+    # Pass 1: count word frequencies (streaming, bounded memory)
+    word_counts = _count_word_frequencies(old_tokenizer)
+
+    # Build allowed word set
+    allowed_words = _build_allowed_words(word_counts)
+
+    # Free the counter before pass 2
+    del word_counts
+
     print(
-        f"Training new vocabulary of size {VOCAB_SIZE} with up to "
-        f"{MAX_BATCH_EXAMPLES} examples / {MAX_BATCH_CHARACTERS} characters buffered at once."
+        f"\nTraining new vocabulary of size {VOCAB_SIZE}.\n"
+        f"RAM budget: {MAX_RAM_GB:.0f} GB | "
+        f"max unique words: {MAX_UNIQUE_WORDS:,} | "
+        f"min_frequency: {MIN_FREQUENCY}"
     )
-    
-    # Train the new tokenizer purely on your local data stream!
+
+    # Pass 2: train tokenizer on filtered text
     new_tokenizer = old_tokenizer.train_new_from_iterator(
-        text_iterator=batch_iterator(),
+        text_iterator=_filtered_batch_iterator(old_tokenizer, allowed_words),
         vocab_size=VOCAB_SIZE,
-        new_special_tokens=SPECIAL_TOKENS
+        new_special_tokens=SPECIAL_TOKENS,
+        min_frequency=MIN_FREQUENCY,
     )
     
     # Set the pad and eos tokens

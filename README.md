@@ -184,18 +184,38 @@ Generate the 64k mathematical vocabulary strictly from your local `train/` data:
 python train_tokenizer.py
 ```
 
-The tokenizer trainer now streams local `.jsonl`, `.json`, and `.parquet` files with a bounded in-memory buffer instead of collecting large chunks of the corpus in RAM. If you are on a smaller machine, lower the buffer further:
+The tokenizer trainer uses a **two-pass approach** to keep memory bounded on any machine:
+
+1. **Pass 1 — Word census:** Streams all local `.jsonl`, `.json`, and `.parquet` files through the template tokenizer's pre-tokenizer, counting word frequencies in a Python `Counter`. Memory usage: O(unique words), typically 200–500 MB.
+2. **Filtering:** Drops words appearing fewer than `MIN_FREQUENCY` times, then caps at `MAX_UNIQUE_WORDS` (default 800K). Each unique word costs ~15–20 KB inside the Rust BPE trainer, so 800K words ≈ 12–16 GB peak.
+3. **Pass 2 — Filtered training:** Streams the data again, stripping any rare words not in the allowed set, and feeds the cleaned text to the BPE trainer. The trainer only ever sees the allowed vocabulary, keeping RAM predictable regardless of corpus size.
 
 ```bash
-TOKENIZER_MAX_BATCH_EXAMPLES=32 TOKENIZER_MAX_BATCH_CHARACTERS=500000 python train_tokenizer.py
+# 30 GB machine (default)
+python train_tokenizer.py
+
+# 16 GB machine — fewer unique words to stay safe
+TOKENIZER_MAX_RAM_GB=16 TOKENIZER_MAX_UNIQUE_WORDS=400000 python train_tokenizer.py
+
+# 8 GB machine
+TOKENIZER_MAX_RAM_GB=8 TOKENIZER_MAX_UNIQUE_WORDS=200000 python train_tokenizer.py
 ```
+
+| RAM budget | Suggested MAX_UNIQUE_WORDS | Approx peak RAM |
+|---|---|---|
+| 8 GB | 400,000 | ~6–8 GB |
+| 16 GB | 800,000 (default) | ~12–16 GB |
+| 32 GB | 1,200,000 | ~18–24 GB |
 
 Optional controls:
 
-- `TOKENIZER_MAX_BATCH_EXAMPLES`: max number of documents held in memory before flushing to the trainer
-- `TOKENIZER_MAX_BATCH_CHARACTERS`: max total characters held in memory before flushing to the trainer
-- `TOKENIZER_PARQUET_BATCH_SIZE`: rows read at a time from parquet files
-- `TOKENIZER_MAX_TEXT_CHARACTERS`: optional per-document truncation limit, disabled by default
+- `TOKENIZER_MAX_RAM_GB`: your available RAM in GB; sets a generous corpus byte cap (default: `30`)
+- `TOKENIZER_MAX_UNIQUE_WORDS`: max unique pre-tokenized words the BPE trainer will see (default: `800000`)
+- `TOKENIZER_MIN_FREQUENCY`: minimum word frequency to be included in training (default: `3`)
+- `TOKENIZER_MAX_TEXT_CHARACTERS`: per-document truncation limit (default: `2000`, set to `0` to disable)
+- `TOKENIZER_MAX_BATCH_EXAMPLES`: max documents buffered before flushing to the trainer (default: `128`)
+- `TOKENIZER_MAX_BATCH_CHARACTERS`: max total characters buffered before flushing (default: `2000000`)
+- `TOKENIZER_PARQUET_BATCH_SIZE`: rows read at a time from parquet files (default: `256`)
 
 ### 3. Launch Phase 1 (Pre-Training)
 

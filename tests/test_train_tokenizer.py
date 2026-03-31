@@ -1,3 +1,4 @@
+import collections
 import json
 import os
 from unittest import mock
@@ -268,3 +269,103 @@ class TestBatchIterator:
         all_texts = [t for b in batches for t in b]
         assert "from_a" in all_texts
         assert "from_b" in all_texts
+
+    def test_stops_at_corpus_byte_cap(self, tmp_path):
+        # 10 docs of 100 bytes each = 1000 bytes total; cap at 350 bytes.
+        data_dir = self._make_data_dir(
+            tmp_path, [{"text": "x" * 100} for _ in range(10)]
+        )
+        with mock.patch.object(tt, "DATA_DIR", str(data_dir)), \
+             mock.patch.object(tt, "MAX_CORPUS_BYTES", 350):
+            batches = list(tt.batch_iterator(max_batch_examples=10**9, max_batch_characters=10**9))
+
+        total_docs = sum(len(b) for b in batches)
+        # Should stop after ~3-4 docs (300-400 bytes), never see all 10
+        assert total_docs < 10
+        assert total_docs >= 3
+
+
+# ---------------------------------------------------------------------------
+# _corpus_bytes_for_ram
+# ---------------------------------------------------------------------------
+
+class TestCorpusBytesForRam:
+    def test_30gb_default(self):
+        # 30 GB -> (30 - 4) * 1 GB = 26 GB
+        result = tt._corpus_bytes_for_ram(30)
+        assert result == int(26 * 1_073_741_824)
+
+    def test_8gb(self):
+        # 8 GB -> (8 - 4) * 1 GB = 4 GB
+        result = tt._corpus_bytes_for_ram(8)
+        assert result == int(4 * 1_073_741_824)
+
+    def test_32gb(self):
+        # 32 GB -> (32 - 4) * 1 GB = 28 GB
+        result = tt._corpus_bytes_for_ram(32)
+        assert result == int(28 * 1_073_741_824)
+
+    def test_very_small_ram_floors_at_half_gb(self):
+        # 1 GB -> max(1 - 4, 0.5) = 0.5 -> 0.5 * 1 GB
+        result = tt._corpus_bytes_for_ram(1)
+        assert result == int(0.5 * 1_073_741_824)
+        assert result > 0
+
+
+# ---------------------------------------------------------------------------
+# _prune_counter
+# ---------------------------------------------------------------------------
+
+class TestPruneCounter:
+    def test_removes_low_frequency_words(self):
+        counts = collections.Counter({"a": 100, "b": 50, "rare1": 1, "rare2": 1})
+        result, threshold = tt._prune_counter(counts, target_size=2)
+        assert "a" in result
+        assert "b" in result
+        assert "rare1" not in result
+        assert "rare2" not in result
+        assert threshold >= 2
+
+    def test_keeps_all_if_already_under_target(self):
+        counts = collections.Counter({"a": 5, "b": 3})
+        result, threshold = tt._prune_counter(counts, target_size=10)
+        assert len(result) == 2
+        assert threshold == 1  # no pruning needed (min_count stayed at 2, returned 1)
+
+    def test_escalates_threshold_until_fits(self):
+        # 5 words with counts 1,2,3,4,5 — target 2 means keep only count>=4
+        counts = collections.Counter({"a": 5, "b": 4, "c": 3, "d": 2, "e": 1})
+        result, threshold = tt._prune_counter(counts, target_size=2)
+        assert len(result) <= 2
+        assert "a" in result
+
+
+# ---------------------------------------------------------------------------
+# _build_allowed_words
+# ---------------------------------------------------------------------------
+
+class TestBuildAllowedWords:
+    def test_filters_by_min_frequency(self):
+        counts = collections.Counter({"hello": 10, "world": 5, "rare": 1})
+        with mock.patch.object(tt, "MIN_FREQUENCY", 3), \
+             mock.patch.object(tt, "MAX_UNIQUE_WORDS", 1000):
+            result = tt._build_allowed_words(counts)
+        assert "hello" in result
+        assert "world" in result
+        assert "rare" not in result
+
+    def test_caps_at_max_unique_words(self):
+        counts = collections.Counter({"a": 100, "b": 50, "c": 10, "d": 5})
+        with mock.patch.object(tt, "MIN_FREQUENCY", 2), \
+             mock.patch.object(tt, "MAX_UNIQUE_WORDS", 2):
+            result = tt._build_allowed_words(counts)
+        assert len(result) == 2
+        assert "a" in result
+        assert "b" in result
+
+    def test_returns_frozenset(self):
+        counts = collections.Counter({"x": 5})
+        with mock.patch.object(tt, "MIN_FREQUENCY", 1), \
+             mock.patch.object(tt, "MAX_UNIQUE_WORDS", 1000):
+            result = tt._build_allowed_words(counts)
+        assert isinstance(result, frozenset)
