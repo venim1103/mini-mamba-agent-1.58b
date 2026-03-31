@@ -341,6 +341,49 @@ class TestPruneCounter:
 
 
 # ---------------------------------------------------------------------------
+# piece splitting / pass-2 normalization
+# ---------------------------------------------------------------------------
+
+class TestTrainingPieceNormalization:
+    def test_iter_training_pieces_splits_json_structure(self):
+        text = '{"name":"get_weather","arguments":{"city":"Berlin"}}'
+        pieces = list(tt._iter_training_pieces(text))
+
+        assert ("punct", "{") in pieces
+        assert ("word", "name") in pieces
+        assert ("word", "get_weather") in pieces
+        assert ("punct", ":") in pieces
+        assert ("punct", "}") in pieces
+
+    def test_normalize_text_preserves_punctuation_for_tool_json(self):
+        text = '{"name":"get_weather","arguments":{"city":"Berlin","unit":"celsius"}}'
+        allowed = {"name", "arguments", "city", "Berlin", "unit", "celsius"}
+
+        normalized = tt._normalize_text_for_training(text, allowed)
+
+        assert normalized is not None
+        assert "{" in normalized
+        assert "}" in normalized
+        assert ":" in normalized
+        assert "," in normalized
+        assert '"' in normalized
+        assert "name" in normalized
+        assert "arguments" in normalized
+        assert "get_weather" not in normalized
+
+    def test_normalize_text_drops_disallowed_words_but_keeps_allowed_words(self):
+        text = "alpha + beta == gamma"
+        normalized = tt._normalize_text_for_training(text, {"alpha", "gamma"})
+
+        assert normalized is not None
+        assert "alpha" in normalized
+        assert "gamma" in normalized
+        assert "beta" not in normalized
+        assert "+" in normalized
+        assert "=" in normalized
+
+
+# ---------------------------------------------------------------------------
 # _build_allowed_words
 # ---------------------------------------------------------------------------
 

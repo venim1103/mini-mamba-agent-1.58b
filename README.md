@@ -187,7 +187,7 @@ python train_tokenizer.py
 The tokenizer trainer uses a **two-pass approach** to keep memory bounded on any machine:
 
 1. **Pass 1 — Word census:** Streams all local `.jsonl`, `.json`, and `.parquet` files through the template tokenizer's pre-tokenizer, counting word frequencies in a Python `Counter`. Memory usage: O(unique words), typically 200–500 MB.
-2. **Filtering:** Drops words appearing fewer than `MIN_FREQUENCY` times, then caps at `MAX_UNIQUE_WORDS` (default 800K). Each unique word costs ~15–20 KB inside the Rust BPE trainer, so 800K words ≈ 12–16 GB peak.
+2. **Filtering:** Drops words appearing fewer than `MIN_FREQUENCY` times, then caps at `MAX_UNIQUE_WORDS` (default 300K). Each unique word costs ~15–20 KB inside the Rust BPE trainer, so 300K words is a safer default for 30 GB machines on diverse corpora.
 3. **Pass 2 — Filtered training:** Streams the data again, stripping any rare words not in the allowed set, and feeds the cleaned text to the BPE trainer. The trainer only ever sees the allowed vocabulary, keeping RAM predictable regardless of corpus size.
 
 ```bash
@@ -195,22 +195,22 @@ The tokenizer trainer uses a **two-pass approach** to keep memory bounded on any
 python train_tokenizer.py
 
 # 16 GB machine — fewer unique words to stay safe
-TOKENIZER_MAX_RAM_GB=16 TOKENIZER_MAX_UNIQUE_WORDS=400000 python train_tokenizer.py
+TOKENIZER_MAX_RAM_GB=16 TOKENIZER_MAX_UNIQUE_WORDS=200000 python train_tokenizer.py
 
 # 8 GB machine
-TOKENIZER_MAX_RAM_GB=8 TOKENIZER_MAX_UNIQUE_WORDS=200000 python train_tokenizer.py
+TOKENIZER_MAX_RAM_GB=8 TOKENIZER_MAX_UNIQUE_WORDS=100000 python train_tokenizer.py
 ```
 
 | RAM budget | Suggested MAX_UNIQUE_WORDS | Approx peak RAM |
 |---|---|---|
-| 8 GB | 400,000 | ~6–8 GB |
-| 16 GB | 800,000 (default) | ~12–16 GB |
-| 32 GB | 1,200,000 | ~18–24 GB |
+| 8 GB | 100,000 | ~2–4 GB |
+| 16 GB | 200,000 | ~4–8 GB |
+| 30 GB | 300,000 (default) | ~8–14 GB |
 
 Optional controls:
 
 - `TOKENIZER_MAX_RAM_GB`: your available RAM in GB; sets a generous corpus byte cap (default: `30`)
-- `TOKENIZER_MAX_UNIQUE_WORDS`: max unique pre-tokenized words the BPE trainer will see (default: `800000`)
+- `TOKENIZER_MAX_UNIQUE_WORDS`: max unique pre-tokenized words the BPE trainer will see (default: `300000`)
 - `TOKENIZER_MIN_FREQUENCY`: minimum word frequency to be included in training (default: `3`)
 - `TOKENIZER_MAX_TEXT_CHARACTERS`: per-document truncation limit (default: `2000`, set to `0` to disable)
 - `TOKENIZER_MAX_BATCH_EXAMPLES`: max documents buffered before flushing to the trainer (default: `128`)

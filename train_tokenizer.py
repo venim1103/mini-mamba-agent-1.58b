@@ -15,6 +15,7 @@
 import collections
 import json
 import os
+import re
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -41,8 +42,9 @@ MAX_TEXT_CHARACTERS = int(os.getenv("TOKENIZER_MAX_TEXT_CHARACTERS", "2000"))
 MIN_FREQUENCY = int(os.getenv("TOKENIZER_MIN_FREQUENCY", "3"))
 # Target unique word count that fits in RAM.  Each unique word costs ~15-20 KB
 # in the Rust BPE trainer (word string + character-level tokenisation + pair
-# counts + priority queue entries).  800K words ≈ 12-16 GB peak RAM.
-MAX_UNIQUE_WORDS = int(os.getenv("TOKENIZER_MAX_UNIQUE_WORDS", "800000"))
+# counts + priority queue entries). 300K words is a safer default for 30 GB
+# machines when training on diverse web/code corpora.
+MAX_UNIQUE_WORDS = int(os.getenv("TOKENIZER_MAX_UNIQUE_WORDS", "300000"))
 
 def _corpus_bytes_for_ram(ram_gb):
     """Return a generous corpus byte cap as a first-pass limit.
@@ -67,6 +69,7 @@ SPECIAL_TOKENS = [
 ]
 
 SUPPORTED_SUFFIXES = (".jsonl", ".json", ".parquet")
+TRAINING_PIECE_RE = re.compile(r"\s+|\w+|[^\w\s]", re.UNICODE)
 
 # ==========================================
 # 2. RAM-Friendly Data Iterator
@@ -223,6 +226,57 @@ def _prune_counter(word_counts, target_size):
     return word_counts, min_count - 1
 
 
+def _iter_training_pieces(text):
+    """Yield normalized pieces used for pass-1 counting and pass-2 filtering.
+
+    We intentionally split more finely than the template pre-tokenizer because
+    structured strings like JSON blobs can otherwise appear as one giant unique
+    token, which both explodes memory and causes pass 2 to drop important
+    punctuation wholesale.
+    """
+    for match in TRAINING_PIECE_RE.finditer(text):
+        piece = match.group(0)
+        if piece.isspace():
+            yield "space", piece
+        elif piece[0].isalnum() or piece[0] == "_":
+            yield "word", piece
+        else:
+            yield "punct", piece
+
+
+def _normalize_text_for_training(text, allowed_words):
+    """Keep punctuation and frequent words while forcing smaller token units.
+
+    The emitted text is intentionally normalized with separator spaces around
+    punctuation and kept words. This prevents the downstream pre-tokenizer from
+    re-collapsing whole JSON/code snippets into single giant unique tokens.
+    """
+    pieces = []
+    needs_separator = False
+
+    for kind, piece in _iter_training_pieces(text):
+        if kind == "space":
+            if not pieces or pieces[-1] != "\n":
+                pieces.append("\n" if "\n" in piece else " ")
+            needs_separator = False
+            continue
+
+        if kind == "word" and piece not in allowed_words:
+            if pieces and pieces[-1] != " ":
+                pieces.append(" ")
+            needs_separator = False
+            continue
+
+        if needs_separator and pieces and not pieces[-1].isspace():
+            pieces.append(" ")
+
+        pieces.append(piece)
+        needs_separator = True
+
+    normalized = "".join(pieces).strip()
+    return normalized or None
+
+
 def _count_word_frequencies(tokenizer):
     """Pass 1: stream all data, pre-tokenize, count word frequencies.
 
@@ -234,7 +288,6 @@ def _count_word_frequencies(tokenizer):
     it is back to 2× MAX_UNIQUE_WORDS.  This means only genuinely
     frequent words survive, which is exactly what we want.
     """
-    pre_tokenizer = tokenizer.backend_tokenizer.pre_tokenizer
     word_counts = collections.Counter()
     total_bytes = 0
     corpus_limit = MAX_CORPUS_BYTES
@@ -251,8 +304,9 @@ def _count_word_frequencies(tokenizer):
             text_bytes = len(text.encode("utf-8", errors="replace"))
             total_bytes += text_bytes
 
-            for word, _span in pre_tokenizer.pre_tokenize_str(text):
-                word_counts[word] += 1
+            for kind, piece in _iter_training_pieces(text):
+                if kind == "word":
+                    word_counts[piece] += 1
 
             if len(word_counts) > prune_trigger:
                 word_counts, threshold = _prune_counter(word_counts, prune_target)
@@ -301,7 +355,6 @@ def _filtered_batch_iterator(tokenizer, allowed_words):
     The BPE trainer will only see the allowed words, keeping unique-word
     count bounded regardless of corpus size or diversity.
     """
-    pre_tokenizer = tokenizer.backend_tokenizer.pre_tokenizer
     total_bytes = 0
     corpus_limit = MAX_CORPUS_BYTES
 
@@ -316,15 +369,10 @@ def _filtered_batch_iterator(tokenizer, allowed_words):
             text_bytes = len(text.encode("utf-8", errors="replace"))
             total_bytes += text_bytes
 
-            # Reconstruct text keeping only allowed words
-            parts = []
-            for word, (start, end) in pre_tokenizer.pre_tokenize_str(text):
-                if word in allowed_words:
-                    parts.append(text[start:end])
-            if not parts:
+            filtered_text = _normalize_text_for_training(text, allowed_words)
+            if not filtered_text:
                 continue
 
-            filtered_text = "".join(parts)
             batch.append(filtered_text)
             batch_characters += len(filtered_text)
 
