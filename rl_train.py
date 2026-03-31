@@ -155,6 +155,15 @@ def filter_problems_on_policy(model, tokenizer, problems, eos_id):
 
 
 def main():
+    global DEVICE
+
+    # RL is single-GPU only (GRPO generation is inherently sequential).
+    # Skip DDP init entirely to avoid collective-operation deadlocks.
+    rank = int(os.environ.get("RANK", "0"))
+    if rank != 0:
+        print(f"[rl_train] Rank {rank}: RL is single-GPU only, exiting.")
+        return
+
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     wandb.init(project="Agentic-1.58b-Model", name="run-rl-grpo")
     
@@ -214,7 +223,7 @@ def main():
             input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(DEVICE)
             
             # G6: Offload optimizer states to CPU during generation (~1.65GB savings)
-            if DEVICE == "cuda":
+            if DEVICE.startswith("cuda"):
                 for opt in [muon_opt, adam_opt, mamba_opt]:
                     for state in opt.state.values():
                         for k, v in state.items():
@@ -248,7 +257,7 @@ def main():
             advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
             
             # G6: Restore optimizer states from CPU back to GPU
-            if DEVICE == "cuda":
+            if DEVICE.startswith("cuda"):
                 for opt in [muon_opt, adam_opt, mamba_opt]:
                     for state in opt.state.values():
                         for k, v in state.items():

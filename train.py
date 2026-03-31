@@ -20,6 +20,10 @@ import wandb
 from model import BitMambaLLM, chunked_cross_entropy, maybe_autocast
 from data import create_dataloaders
 from optim import setup_mamba_optimizers, FGWSD_Scheduler
+from dist_utils import (
+    setup_distributed, cleanup_distributed, is_main_process,
+    wrap_model_ddp, unwrap_model, barrier,
+)
 
 MODE = "scout" 
 
@@ -39,7 +43,7 @@ else:
     TOTAL_STEPS = 1_000_000 
     PEAK_LR = 3.0e-4 
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # overridden by setup_distributed()
 BATCH_SIZE = 2             
 GRAD_ACCUM_STEPS = 8       
 SAVE_EVERY = 5000
@@ -132,10 +136,16 @@ def create_seq_idx_batch(cu_seqlens_padded, n_segs, seqlen):
     return seq_idx
 
 def main():
+    global DEVICE
+    rank, local_rank, world_size, device = setup_distributed()
+    DEVICE = device  # update module-level DEVICE for create_seq_idx_batch
+
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    wandb.init(project="Agentic-1.58b-Model", name=f"run-bitmamba-{MODE}", config=CURRICULUM_CONFIG)
+    if is_main_process():
+        wandb.init(project="Agentic-1.58b-Model", name=f"run-bitmamba-{MODE}", config=CURRICULUM_CONFIG)
     
-    print(f"Initializing {MODE.upper()} BitMamba Model...")
+    if is_main_process():
+        print(f"Initializing {MODE.upper()} BitMamba Model...")
     model = BitMambaLLM(**MODEL_CONFIG).to(DEVICE)
     
     # Load upscaled checkpoint if in continued pretraining mode
@@ -153,8 +163,12 @@ def main():
     
     # G12: torch.compile the shared backbone so both forward() and forward_hidden() benefit
     model._backbone = torch.compile(model._backbone, mode="reduce-overhead")
+
+    # Wrap in DDP after compile but before optimizer creation
+    model = wrap_model_ddp(model, local_rank)
+    raw_model = unwrap_model(model)  # for state_dict saves and output head access
     
-    muon_opt, adam_opt, mamba_core_opt = setup_mamba_optimizers(model, CURRICULUM_CONFIG)
+    muon_opt, adam_opt, mamba_core_opt = setup_mamba_optimizers(raw_model, CURRICULUM_CONFIG)
     scheduler = FGWSD_Scheduler(muon_opt, adam_opt, mamba_core_opt, TOTAL_STEPS, CURRICULUM_CONFIG)
     
     # Start with Phase_1 (warmup) data config for FG-WSD
@@ -169,7 +183,7 @@ def main():
     previous_ctx = initial_ctx
     previous_phase = "Phase_1"  # Track phase changes for FG-WSD data quality progression
     # G10: GradScaler for FP16 (no-op when using BF16)
-    scaler = torch.amp.GradScaler(enabled=(DEVICE == "cuda" and AMP_DTYPE == torch.float16))
+    scaler = torch.amp.GradScaler(enabled=(DEVICE.startswith("cuda") and AMP_DTYPE == torch.float16))
     
     for step in range(TOTAL_STEPS):
         current_lr, current_ctx, phase_name = scheduler.step(step)
@@ -178,8 +192,9 @@ def main():
         need_reload = False
         if phase_name != previous_phase and phase_name != "Complete" and previous_phase is not None:
             need_reload = True
-            print(f"  [FG-WSD] Phase changed to {phase_name}: data quality updated")
-            wandb.log({"System/FG_WSD_Phase": phase_name}, step=step)
+            if is_main_process():
+                print(f"  [FG-WSD] Phase changed to {phase_name}: data quality updated")
+                wandb.log({"System/FG_WSD_Phase": phase_name}, step=step)
         if current_ctx != previous_ctx:
             need_reload = True
         
@@ -208,7 +223,7 @@ def main():
             with maybe_autocast(DEVICE, amp_dtype=AMP_DTYPE):
                 # G2: Chunked cross-entropy avoids materializing full [BS, ctx, vocab] logits
                 hidden = model.forward_hidden(x, seq_idx=seq_idx)
-                loss = chunked_cross_entropy(hidden, model.output, y) / GRAD_ACCUM_STEPS
+                loss = chunked_cross_entropy(hidden, raw_model.output, y) / GRAD_ACCUM_STEPS
             scaler.scale(loss).backward()
             accumulated_loss += loss.item()
             
@@ -221,16 +236,20 @@ def main():
         tokens_this_step = BATCH_SIZE * GRAD_ACCUM_STEPS * current_ctx
         total_tokens += tokens_this_step
         
-        if step % 10 == 0:
+        if step % 10 == 0 and is_main_process():
             t1 = time.time()
             dt, t0 = t1 - t0, t1
-            print(f"Step {step:06d} | {phase_name:<15} | Loss: {accumulated_loss:.4f} | Tok/s: {tokens_this_step/dt:.0f}")
-            wandb.log({"Train/Loss": accumulated_loss, "System/Total_Tokens": total_tokens}, step=step)
+            toks = tokens_this_step * world_size  # count tokens across all ranks
+            print(f"Step {step:06d} | {phase_name:<15} | Loss: {accumulated_loss:.4f} | Tok/s: {toks/dt:.0f}")
+            wandb.log({"Train/Loss": accumulated_loss, "System/Total_Tokens": total_tokens * world_size}, step=step)
 
-        if step > 0 and step % SAVE_EVERY == 0:
-            torch.save({'step': step, 'model_state_dict': model.state_dict()}, os.path.join(CHECKPOINT_DIR, f"step_{step:06d}.pt"))
+        if step > 0 and step % SAVE_EVERY == 0 and is_main_process():
+            torch.save({'step': step, 'model_state_dict': raw_model.state_dict()}, os.path.join(CHECKPOINT_DIR, f"step_{step:06d}.pt"))
+        barrier()  # sync before next step
 
-    wandb.finish()
+    if is_main_process():
+        wandb.finish()
+    cleanup_distributed()
 
 if __name__ == "__main__":
     main()

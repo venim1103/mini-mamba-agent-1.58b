@@ -20,8 +20,12 @@ from model import BitMambaLLM, chunked_cross_entropy, maybe_autocast
 from optim import setup_mamba_optimizers
 from sft_data import SFT_STAGES, create_sft_dataloader
 from transformers import AutoTokenizer
+from dist_utils import (
+    setup_distributed, cleanup_distributed, is_main_process,
+    wrap_model_ddp, unwrap_model, barrier,
+)
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # overridden by setup_distributed()
 PRETRAINED_CKPT = "checkpoints/bitmamba_parent/step_1000000.pt" 
 CHECKPOINT_DIR = "checkpoints/sft"
 MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2, use_checkpoint=True)
@@ -32,6 +36,7 @@ GRAD_ACCUM_STEPS = 8
 
 def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
     """Run one SFT stage: create dataloader, optimizer, and train for N epochs."""
+    raw_model = unwrap_model(model)
     name = stage_cfg["name"]
     lr = stage_cfg["lr"]
     epochs = stage_cfg["epochs"]
@@ -43,16 +48,20 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
         reasoning_off_prob=stage_cfg["reasoning_off_prob"],
     )
 
-    muon_opt, adam_opt, mamba_opt = setup_mamba_optimizers(model, {"peak_lr": lr, "end_lr": lr * 0.1})
+    muon_opt, adam_opt, mamba_opt = setup_mamba_optimizers(raw_model, {"peak_lr": lr, "end_lr": lr * 0.1})
     total_optim_steps = len(train_loader) * epochs // GRAD_ACCUM_STEPS
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(adam_opt, T_max=max(total_optim_steps, 1), eta_min=lr * 0.1)
 
-    print(f"\n{'='*60}")
-    print(f"SFT Stage {stage_num}: {name} | epochs={epochs} lr={lr} samples={len(train_loader.dataset)}")
-    print(f"{'='*60}")
+    if is_main_process():
+        print(f"\n{'='*60}")
+        print(f"SFT Stage {stage_num}: {name} | epochs={epochs} lr={lr} samples={len(train_loader.dataset)}")
+        print(f"{'='*60}")
 
     model.train()
     for epoch in range(epochs):
+        # DistributedSampler must be told the epoch so it shuffles differently each time
+        if hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
         for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
         accumulated_loss = 0.0
         n_batches = len(train_loader)
@@ -69,7 +78,7 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
 
             with maybe_autocast(DEVICE):
                 hidden = model.forward_hidden(x, seq_idx=None)
-                loss = chunked_cross_entropy(hidden[:, :-1, :], model.output, y[..., 1:], ignore_index=-100) / accum_divisor
+                loss = chunked_cross_entropy(hidden[:, :-1, :], raw_model.output, y[..., 1:], ignore_index=-100) / accum_divisor
             loss.backward()
             accumulated_loss += loss.item()
             
@@ -87,7 +96,7 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
                 for opt in [muon_opt, adam_opt, mamba_opt]: opt.step()
                 for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
                 
-                if global_step % 10 == 0:
+                if global_step % 10 == 0 and is_main_process():
                     wandb.log({
                         f"SFT/{name}_Loss": accumulated_loss,
                         "SFT/Stage": stage_num,
@@ -96,29 +105,41 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
                 accumulated_loss = 0.0
                 global_step += 1
                 
-        ckpt_path = os.path.join(CHECKPOINT_DIR, f"sft_stage{stage_num}_{name}_epoch{epoch+1}.pt")
-        torch.save({'stage': stage_num, 'epoch': epoch, 'model_state_dict': model.state_dict()}, ckpt_path)
-        print(f"  Epoch {epoch+1}/{epochs} done → {ckpt_path}")
+        if is_main_process():
+            ckpt_path = os.path.join(CHECKPOINT_DIR, f"sft_stage{stage_num}_{name}_epoch{epoch+1}.pt")
+            torch.save({'stage': stage_num, 'epoch': epoch, 'model_state_dict': raw_model.state_dict()}, ckpt_path)
+            print(f"  Epoch {epoch+1}/{epochs} done → {ckpt_path}")
+        barrier()
 
     return global_step
 
 
 def main():
+    global DEVICE
+    rank, local_rank, world_size, device = setup_distributed()
+    DEVICE = device
+
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    wandb.init(project="Agentic-1.58b-Model", name="run-sft-bitmamba-3stage")
+    if is_main_process():
+        wandb.init(project="Agentic-1.58b-Model", name="run-sft-bitmamba-3stage")
     
     tokenizer = AutoTokenizer.from_pretrained("custom_agentic_tokenizer")
     model = BitMambaLLM(**MODEL_CONFIG).to(DEVICE)
     model.load_state_dict(torch.load(PRETRAINED_CKPT, map_location=DEVICE)['model_state_dict'])
+
+    model = wrap_model_ddp(model, local_rank)
+    raw_model = unwrap_model(model)
     
     global_step = 0
     for stage_num, stage_cfg in enumerate(SFT_STAGES, start=1):
         global_step = run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step)
     
     # Save final checkpoint
-    torch.save({'model_state_dict': model.state_dict()}, os.path.join(CHECKPOINT_DIR, "sft_final.pt"))
-    print(f"\nSFT complete. Final checkpoint → {CHECKPOINT_DIR}/sft_final.pt")
-    wandb.finish()
+    if is_main_process():
+        torch.save({'model_state_dict': raw_model.state_dict()}, os.path.join(CHECKPOINT_DIR, "sft_final.pt"))
+        print(f"\nSFT complete. Final checkpoint → {CHECKPOINT_DIR}/sft_final.pt")
+        wandb.finish()
+    cleanup_distributed()
 
 if __name__ == "__main__":
     main()

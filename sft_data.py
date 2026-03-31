@@ -17,6 +17,8 @@ import os
 import random
 import re
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
 from datasets import load_dataset
 
 
@@ -259,8 +261,16 @@ def create_sft_dataloader(data_paths, tokenizer, max_seq_len=4096, batch_size=2,
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
     collate = functools.partial(sft_collate_fn, pad_token_id=pad_id)
     combined = ConcatDataset(datasets) if len(datasets) > 1 else datasets[0]
+
+    # Use DistributedSampler when running multi-GPU via torchrun
+    sampler = None
+    shuffle = True
+    if dist.is_initialized():
+        sampler = DistributedSampler(combined, shuffle=True)
+        shuffle = False  # sampler handles shuffling
+
     return DataLoader(
-        combined, batch_size=batch_size, shuffle=True,
+        combined, batch_size=batch_size, shuffle=shuffle, sampler=sampler,
         pin_memory=True, num_workers=4, collate_fn=collate
     )
 
