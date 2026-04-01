@@ -2,20 +2,6 @@ import pytest
 import json
 from unittest.mock import MagicMock, patch, mock_open
 from pathlib import Path
-import sys
-
-# Mock heavy dependencies before importing modules
-mock_modules = {
-    'torch': MagicMock(),
-    'torch.nn': MagicMock(),
-    'transformers': MagicMock(),
-    'transformers.AutoTokenizer': MagicMock(),
-    'statistics': MagicMock(),
-    'statistics.mean': MagicMock(return_value=1.0),
-}
-for name, obj in mock_modules.items():
-    if name not in sys.modules:
-        sys.modules[name] = obj
 
 
 class TestDefaultSamples:

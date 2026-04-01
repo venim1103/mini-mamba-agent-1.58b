@@ -1,38 +1,5 @@
 import pytest
 from unittest.mock import MagicMock, patch
-import sys
-
-# Mock heavy dependencies
-mock_modules = {
-    'torch': MagicMock(),
-    'torch.nn': MagicMock(),
-    'torch.nn.functional': MagicMock(),
-    'torch.optim': MagicMock(),
-    'torch.optim.lr_scheduler': MagicMock(),
-    'wandb': MagicMock(),
-    'transformers': MagicMock(),
-    'transformers.AutoTokenizer': MagicMock(),
-    'model': MagicMock(),
-    'model.BitMambaLLM': MagicMock(),
-    'model.chunked_cross_entropy': MagicMock(),
-    'model.maybe_autocast': MagicMock(),
-    'optim': MagicMock(),
-    'optim.setup_mamba_optimizers': MagicMock(),
-    'optim.FGWSD_Scheduler': MagicMock(),
-    'sft_data': MagicMock(),
-    'sft_data.SFT_STAGES': MagicMock(),
-    'sft_data.create_sft_dataloader': MagicMock(),
-    'dist_utils': MagicMock(),
-    'dist_utils.setup_distributed': MagicMock(),
-    'dist_utils.cleanup_distributed': MagicMock(),
-    'dist_utils.is_main_process': MagicMock(),
-    'dist_utils.wrap_model_ddp': MagicMock(),
-    'dist_utils.unwrap_model': MagicMock(),
-    'dist_utils.barrier': MagicMock(),
-}
-for name, obj in mock_modules.items():
-    if name not in sys.modules:
-        sys.modules[name] = obj
 
 
 class TestSFTTrainingConstants:
