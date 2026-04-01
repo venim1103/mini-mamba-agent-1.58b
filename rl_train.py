@@ -15,11 +15,6 @@
 import torch
 import torch.nn.functional as F
 import os
-import wandb
-from datasets import load_dataset
-from transformers import AutoTokenizer
-from model import BitMambaLLM, maybe_autocast
-from optim import setup_mamba_optimizers
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SFT_CKPT = "checkpoints/sft/sft_final.pt"
@@ -155,6 +150,12 @@ def filter_problems_on_policy(model, tokenizer, problems, eos_id):
 
 
 def main():
+    import wandb
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+    from model import BitMambaLLM, maybe_autocast
+    from optim import setup_mamba_optimizers
+
     global DEVICE
 
     # RL is single-GPU only (GRPO generation is inherently sequential).

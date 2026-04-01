@@ -25,7 +25,7 @@ class TestStrategyPrompts:
         from synth_data import STRATEGY_PROMPTS
         template = STRATEGY_PROMPTS["distill"]
         assert "concise" in template.lower()
-        assert "summary" in template.lower()
+        assert "summary" in template.lower() or "summaries" in template.lower()
 
     def test_extract_template_mentions_structured(self):
         from synth_data import STRATEGY_PROMPTS

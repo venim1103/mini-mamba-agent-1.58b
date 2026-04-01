@@ -18,18 +18,17 @@ Usage:
     python gpu_smoke_test.py
 """
 
-import sys
 import torch
 
 from model import BitMambaLLM
 
 
-def main():
+def main() -> int:
     print(f"torch={torch.__version__}, cuda_compiled={torch.version.cuda}")
 
     if not torch.cuda.is_available():
         print("FAIL: torch.cuda.is_available() is False")
-        sys.exit(1)
+        return 1
 
     device = "cuda"
     print(f"Using GPU: {torch.cuda.get_device_name(0)}")
@@ -51,7 +50,8 @@ def main():
 
     print("PASS")
     print(f"input_shape={tuple(x.shape)} output_shape={tuple(y.shape)} device={y.device}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

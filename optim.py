@@ -15,12 +15,20 @@
 import torch
 import math
 
-# G11: Optional 8-bit AdamW for ~0.46 GB optimizer state savings (Parent model)
-try:
-    import bitsandbytes as bnb
-    Adam8bit = bnb.optim.Adam8bit
-except ImportError:
-    Adam8bit = None
+def _resolve_adam_class(use_8bit=True):
+    """Resolve AdamW implementation lazily to keep CPU imports safe in CI/tests."""
+    if not use_8bit:
+        return torch.optim.AdamW
+
+    # bitsandbytes can abort process import on CPU-only systems; only try on CUDA.
+    if not torch.cuda.is_available():
+        return torch.optim.AdamW
+
+    try:
+        import bitsandbytes as bnb
+        return bnb.optim.Adam8bit
+    except Exception:
+        return torch.optim.AdamW
 
 class Muon(torch.optim.Optimizer):
     def __init__(self, params, lr=1e-3, momentum=0.95, ns_steps=3):
@@ -70,8 +78,8 @@ def setup_mamba_optimizers(model, config, use_8bit=True):
         else:
             adam_params.append(p)
 
-    # G11: Use 8-bit Adam when bitsandbytes is available (~0.46 GB savings)
-    AdamCls = Adam8bit if (use_8bit and Adam8bit is not None) else torch.optim.AdamW
+    # G11: Use 8-bit Adam when available and safe for this runtime.
+    AdamCls = _resolve_adam_class(use_8bit=use_8bit)
 
     muon_opt = Muon(muon_params, lr=config['peak_lr'])
     adam_opt = AdamCls(adam_params, lr=config['peak_lr'], weight_decay=0.01)

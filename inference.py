@@ -12,20 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import torch
 from transformers import AutoTokenizer
 from model import BitMambaLLM, maybe_autocast
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-MODE = "scout" 
+def resolve_model_settings(mode: str):
+    mode = mode.lower()
+    if mode == "scout":
+        return (
+            dict(vocab_size=64000, dim=512, n_layers=24, d_state=64, expand=2),
+            "checkpoints/bitmamba_scout/step_100000.pt",
+        )
+    if mode == "parent":
+        return (
+            dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2),
+            "checkpoints/bitmamba_parent/step_1000000.pt",
+        )
+    raise ValueError(f"Unsupported MODE '{mode}'. Expected 'scout' or 'parent'.")
 
-if MODE == "scout":
-    MODEL_CONFIG = dict(vocab_size=64000, dim=512, n_layers=24, d_state=64, expand=2)
-    CKPT_PATH = "checkpoints/bitmamba_scout/step_100000.pt" 
-else:
-    MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand=2)
-    CKPT_PATH = "checkpoints/bitmamba_parent/step_1000000.pt" 
+
+MODE = os.environ.get("MODE", "scout")
+MODEL_CONFIG, CKPT_PATH = resolve_model_settings(MODE)
 
 def generate(model, tokenizer, prompt, max_new_tokens=150, temperature=0.7):
     model.eval()
@@ -45,7 +55,7 @@ def generate(model, tokenizer, prompt, max_new_tokens=150, temperature=0.7):
     print(generated_text)
     print()
 
-if __name__ == "__main__":
+def main() -> int:
     print("Loading custom tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained("custom_agentic_tokenizer")
     
@@ -56,9 +66,14 @@ if __name__ == "__main__":
         model.load_state_dict(torch.load(CKPT_PATH, map_location=DEVICE)['model_state_dict'])
     except FileNotFoundError:
         print(f"Error: Could not find {CKPT_PATH}.")
-        exit(1)
+        return 1
     
     print("\n--- Testing Model Logic ---")
     chat_prompt = "<|im_start|>system\nYou are a deductive reasoning agent. You must analyze the user's request step-by-step within <think> tags before acting.<|im_end|>\n<|im_start|>user\nIf I have 3 apples and eat 1, how many are left?<|im_end|>\n<|im_start|>assistant\n<think>\n"
     generate(model, tokenizer, prompt=chat_prompt, max_new_tokens=150)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 

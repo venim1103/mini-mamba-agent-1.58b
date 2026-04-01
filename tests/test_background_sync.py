@@ -1,46 +1,123 @@
+from unittest.mock import MagicMock
+
 import pytest
-import time
-from unittest.mock import MagicMock, patch, PropertyMock
-import sys
 
-# Mock ALL heavy dependencies BEFORE any imports - critical for background_sync
-# because it has a while True loop at module level that would hang forever
-_mocked_modules = {
-    'os': MagicMock(),
-    'time': MagicMock(),
-    'time.sleep': MagicMock(),
-    'huggingface_hub': MagicMock(),
-    'huggingface_hub.HfApi': MagicMock(),
-}
-
-for _name, _obj in _mocked_modules.items():
-    if _name not in sys.modules:
-        sys.modules[_name] = _obj
+import background_sync
 
 
-class TestBackgroundSyncConstants:
-    """Test background_sync.py constants."""
+def test_iter_new_checkpoint_files_filters_seen_and_extension(monkeypatch):
+    monkeypatch.setattr(background_sync.os.path, "exists", lambda _: True)
+    monkeypatch.setattr(
+        background_sync.os,
+        "walk",
+        lambda _: [
+            ("checkpoints", [], ["a.pt", "b.txt"]),
+            ("checkpoints/sub", [], ["c.pt"]),
+        ],
+    )
 
-    def test_checkpoint_dir_defined(self):
-        # Import AFTER mocks are set up - mocks prevent the while True loop from running
-        import background_sync
-        assert background_sync.CHECKPOINT_DIR == "checkpoints"
+    seen = {"checkpoints/sub/c.pt"}
+    found = list(background_sync.iter_new_checkpoint_files("checkpoints", seen))
+
+    assert found == ["checkpoints/a.pt"]
 
 
-class TestBackgroundSyncSetup:
-    """Test background_sync.py initialization."""
+def test_upload_checkpoint_success_records_file():
+    api = MagicMock()
+    uploaded = set()
+    logs = []
 
-    def test_uploaded_files_is_set(self):
-        import background_sync
-        assert isinstance(background_sync.uploaded_files, set)
+    ok = background_sync.upload_checkpoint(
+        api,
+        "checkpoints/model.pt",
+        "org/repo",
+        uploaded,
+        sleep_before_upload=0,
+        sleep_fn=lambda _: None,
+        logger=logs.append,
+    )
 
-    def test_hf_token_from_env(self):
-        # Note: Can't properly test reload because the module is already loaded with mocks
-        # Just verify HF_TOKEN is accessed from os.environ
-        import os
-        # The module reads from os.environ.get("HF_TOKEN")
-        assert "HF_TOKEN" in os.environ or True  # Either exists or get returns None
+    assert ok is True
+    assert "checkpoints/model.pt" in uploaded
+    api.upload_file.assert_called_once_with(
+        path_or_fileobj="checkpoints/model.pt",
+        path_in_repo="checkpoints/model.pt",
+        repo_id="org/repo",
+        repo_type="model",
+    )
+    assert any("Backed up model.pt" in msg for msg in logs)
 
-    def test_repo_id_from_env(self):
-        import os
-        assert "REPO_ID" in os.environ or True
+
+def test_upload_checkpoint_failure_does_not_record_file():
+    api = MagicMock()
+    api.upload_file.side_effect = RuntimeError("boom")
+    uploaded = set()
+    logs = []
+
+    ok = background_sync.upload_checkpoint(
+        api,
+        "checkpoints/model.pt",
+        "org/repo",
+        uploaded,
+        sleep_before_upload=0,
+        sleep_fn=lambda _: None,
+        logger=logs.append,
+    )
+
+    assert ok is False
+    assert uploaded == set()
+    assert any("Upload failed model.pt" in msg for msg in logs)
+
+
+def test_sync_once_counts_successes(monkeypatch):
+    api = MagicMock()
+    uploaded = set()
+
+    monkeypatch.setattr(
+        background_sync,
+        "iter_new_checkpoint_files",
+        lambda *_: iter(["checkpoints/a.pt", "checkpoints/b.pt"]),
+    )
+
+    def fake_upload(_api, filepath, *_args, **_kwargs):
+        uploaded.add(filepath)
+        return filepath.endswith("a.pt")
+
+    monkeypatch.setattr(background_sync, "upload_checkpoint", fake_upload)
+
+    count = background_sync.sync_once(api, "org/repo", "checkpoints", uploaded)
+
+    assert count == 1
+    assert uploaded == {"checkpoints/a.pt", "checkpoints/b.pt"}
+
+
+def test_main_requires_repo_id(monkeypatch):
+    monkeypatch.setattr(background_sync, "REPO_ID", None)
+
+    with pytest.raises(ValueError, match="REPO_ID"):
+        background_sync.main()
+
+
+def test_main_initializes_api_and_runs_loop(monkeypatch):
+    fake_api = MagicMock()
+    monkeypatch.setattr(background_sync, "REPO_ID", "org/repo")
+    monkeypatch.setattr(background_sync, "HF_TOKEN", "token")
+    monkeypatch.setattr(background_sync, "HfApi", MagicMock(return_value=fake_api))
+
+    called = {}
+
+    def fake_run_sync_loop(api, repo_id, checkpoint_dir):
+        called["api"] = api
+        called["repo_id"] = repo_id
+        called["checkpoint_dir"] = checkpoint_dir
+
+    monkeypatch.setattr(background_sync, "run_sync_loop", fake_run_sync_loop)
+
+    background_sync.main()
+
+    fake_api.create_repo.assert_called_once_with("org/repo", repo_type="model", private=True)
+    assert called == {
+        "api": fake_api,
+        "repo_id": "org/repo",
+        "checkpoint_dir": background_sync.CHECKPOINT_DIR,
+    }
