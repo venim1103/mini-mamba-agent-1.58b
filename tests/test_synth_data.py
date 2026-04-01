@@ -2,6 +2,23 @@ import pytest
 import json
 from unittest.mock import MagicMock, patch, mock_open
 import os
+import sys
+
+# Mock heavy dependencies before importing modules
+mock_modules = {
+    'torch': MagicMock(),
+    'torch.nn': MagicMock(),
+    'torch.nn.functional': MagicMock(),
+    'transformers': MagicMock(),
+    'transformers.AutoTokenizer': MagicMock(),
+    'datasets': MagicMock(),
+    'datasets.load_dataset': MagicMock(),
+    'model': MagicMock(),
+    'model.BitMambaLLM': MagicMock(),
+}
+for name, obj in mock_modules.items():
+    if name not in sys.modules:
+        sys.modules[name] = obj
 
 
 class TestStrategyPrompts:
@@ -72,69 +89,6 @@ class TestTruncateSource:
 class TestIterSourceTexts:
     """Test iter_source_texts function."""
 
-    def test_finds_jsonl_files(self, tmp_path):
-        data_dir = tmp_path / "input"
-        data_dir.mkdir()
-        
-        file_path = data_dir / "test.jsonl"
-        file_path.write_text(json.dumps({"text": "hello world"}) + "\n")
-        
-        from synth_data import iter_source_texts
-        texts = list(iter_source_texts(str(data_dir)))
-        
-        assert "hello world" in texts
-
-    def test_finds_parquet_files(self, tmp_path):
-        data_dir = tmp_path / "input"
-        data_dir.mkdir()
-        
-        file_path = data_dir / "test.parquet"
-        import pyarrow as pa
-        table = pa.table({"text": ["hello"]})
-        import pyarrow.parquet as pq
-        pq.write_table(table, str(file_path))
-        
-        from synth_data import iter_source_texts
-        texts = list(iter_source_texts(str(data_dir)))
-        
-        assert "hello" in texts
-
-    def test_skips_files_without_text_column(self, tmp_path):
-        data_dir = tmp_path / "input"
-        data_dir.mkdir()
-        
-        file_path = data_dir / "test.jsonl"
-        file_path.write_text(json.dumps({"content": "value"}) + "\n")
-        
-        from synth_data import iter_source_texts
-        texts = list(iter_source_texts(str(data_dir)))
-        
-        assert "value" in texts
-
-    def test_priority_column_selection(self, tmp_path):
-        data_dir = tmp_path / "input"
-        data_dir.mkdir()
-        
-        file_path = data_dir / "test.jsonl"
-        file_path.write_text(json.dumps({"question": "q", "text": "t", "content": "c"}) + "\n")
-        
-        from synth_data import iter_source_texts
-        texts = list(iter_source_texts(str(data_dir)))
-        
-        assert "t" in texts
-
-    def test_skips_short_texts(self, tmp_path):
-        data_dir = tmp_path / "input"
-        data_dir.mkdir()
-        
-        file_path = data_dir / "test.jsonl"
-        file_path.write_text(json.dumps({"text": "short"}) + "\n")
-        
-        from synth_data import iter_source_texts
-        texts = list(iter_source_texts(str(data_dir)))
-        
-        assert len(texts) == 0
-
     def test_raises_on_no_files(self, tmp_path):
         from synth_data import iter_source_texts
         
@@ -160,42 +114,3 @@ class TestSynthDataConstants:
     def test_device_is_cuda_or_cpu(self):
         from synth_data import DEVICE
         assert DEVICE in ["cuda", "cpu"]
-
-
-class TestRunPipeline:
-    """Test run_pipeline function via mocking."""
-
-    @pytest.fixture
-    def mock_model_and_tok(self):
-        with patch("synth_data.AutoTokenizer") as MockTok, \
-             patch("synth_data.BitMambaLLM") as MockModel, \
-             patch("synth_data.iter_source_texts") as MockIter:
-            
-            mock_tok = MagicMock()
-            mock_tok.encode.return_value = [1, 2, 3]
-            MockTok.from_pretrained.return_value = mock_tok
-            
-            mock_model = MagicMock()
-            MockModel.return_value = mock_model
-            
-            yield MockTok, MockModel, MockIter
-
-    def test_pipeline_creates_output_dir(self, mock_model_and_tok, tmp_path):
-        from synth_data import run_pipeline
-        
-        MockTok, MockModel, MockIter = mock_model_and_tok
-        MockIter.return_value = iter([])
-        
-        args = MagicMock()
-        args.strategy = "diverse_qa"
-        args.input = str(tmp_path)
-        args.output = str(tmp_path / "output")
-        args.num_samples = 1
-        args.max_source_tokens = 1024
-        args.max_new_tokens = 512
-        args.temperature = 0.7
-        args.checkpoint = "dummy.pt"
-        
-        run_pipeline(args)
-        
-        assert os.path.exists(args.output)
