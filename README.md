@@ -187,35 +187,49 @@ python train_tokenizer.py
 The tokenizer trainer uses a **two-pass approach** to keep memory bounded on any machine:
 
 1. **Pass 1 — Word census:** Streams all local `.jsonl`, `.json`, and `.parquet` files through the template tokenizer's pre-tokenizer, counting word frequencies in a Python `Counter`. Memory usage: O(unique words), typically 200–500 MB.
-2. **Filtering:** Drops words appearing fewer than `MIN_FREQUENCY` times, then caps at `MAX_UNIQUE_WORDS` (default 300K). Each unique word costs ~15–20 KB inside the Rust BPE trainer, so 300K words is a safer default for 30 GB machines on diverse corpora.
+2. **Filtering:** Drops words appearing fewer than `MIN_FREQUENCY` times, then caps at `MAX_UNIQUE_WORDS`.
+    The script has two default profiles:
+    - `standard` (default outside Kaggle): 300K words
+    - `kaggle` (auto when `KAGGLE_KERNEL_RUN_TYPE` is set): 200K words
+    This keeps merge-phase memory under control on constrained machines.
 3. **Pass 2 — Filtered training:** Streams the data again, stripping any rare words not in the allowed set, and feeds the cleaned text to the BPE trainer. The trainer only ever sees the allowed vocabulary, keeping RAM predictable regardless of corpus size.
 
 ```bash
-# 30 GB machine (default)
+# standard profile (default outside Kaggle)
 python train_tokenizer.py
 
-# 16 GB machine — fewer unique words to stay safe
-TOKENIZER_MAX_RAM_GB=16 TOKENIZER_MAX_UNIQUE_WORDS=200000 python train_tokenizer.py
+# force kaggle-safe defaults even outside Kaggle
+TOKENIZER_PROFILE=kaggle python train_tokenizer.py
 
-# 8 GB machine
-TOKENIZER_MAX_RAM_GB=8 TOKENIZER_MAX_UNIQUE_WORDS=100000 python train_tokenizer.py
+# strict low-memory run
+TOKENIZER_PROFILE=kaggle TOKENIZER_MAX_UNIQUE_WORDS=100000 python train_tokenizer.py
 ```
 
-| RAM budget | Suggested MAX_UNIQUE_WORDS | Approx peak RAM |
+| Profile | Suggested MAX_UNIQUE_WORDS | Approx peak RAM |
 |---|---|---|
-| 8 GB | 100,000 | ~2–4 GB |
-| 16 GB | 200,000 | ~4–8 GB |
-| 30 GB | 300,000 (default) | ~8–14 GB |
+| kaggle | 200,000 (default on Kaggle) | ~5–10 GB |
+| standard | 300,000 (default elsewhere) | ~8–14 GB |
 
 Optional controls:
 
-- `TOKENIZER_MAX_RAM_GB`: your available RAM in GB; sets a generous corpus byte cap (default: `30`)
-- `TOKENIZER_MAX_UNIQUE_WORDS`: max unique pre-tokenized words the BPE trainer will see (default: `300000`)
+- `TOKENIZER_PROFILE`: `standard` or `kaggle` (default: auto-detect)
+- `TOKENIZER_MAX_RAM_GB`: your available RAM in GB; sets a generous corpus byte cap (default: `30` standard, `13` kaggle)
+- `TOKENIZER_MAX_UNIQUE_WORDS`: max unique pre-tokenized words the BPE trainer will see (default: `300000` standard, `200000` kaggle)
 - `TOKENIZER_MIN_FREQUENCY`: minimum word frequency to be included in training (default: `3`)
-- `TOKENIZER_MAX_TEXT_CHARACTERS`: per-document truncation limit (default: `2000`, set to `0` to disable)
-- `TOKENIZER_MAX_BATCH_EXAMPLES`: max documents buffered before flushing to the trainer (default: `128`)
-- `TOKENIZER_MAX_BATCH_CHARACTERS`: max total characters buffered before flushing (default: `2000000`)
-- `TOKENIZER_PARQUET_BATCH_SIZE`: rows read at a time from parquet files (default: `256`)
+- `TOKENIZER_MAX_TEXT_CHARACTERS`: per-document truncation limit (default: `2000` standard, `1600` kaggle; set to `0` to disable)
+- `TOKENIZER_MAX_BATCH_EXAMPLES`: max documents buffered before flushing to the trainer (default: `128` standard, `96` kaggle)
+- `TOKENIZER_MAX_BATCH_CHARACTERS`: max total characters buffered before flushing (default: `2000000` standard, `1200000` kaggle)
+- `TOKENIZER_PARQUET_BATCH_SIZE`: rows read at a time from parquet files (default: `256` standard, `192` kaggle)
+
+### 2b. Alternate Low-RAM Tokenizer (SentencePiece)
+
+For tighter memory limits (for example Kaggle no-swap environments), use the separate SentencePiece trainer:
+
+```bash
+python train_tokenizer_spm.py --profile kaggle --model-type bpe --vocab-size 64000
+```
+
+This path builds a domain-balanced sampled corpus, trains SentencePiece with bounded `input_sentence_size`, and exports HuggingFace tokenizer files into `custom_agentic_tokenizer_spm/`.
 
 ### 3. Launch Phase 1 (Pre-Training)
 

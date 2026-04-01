@@ -35,16 +35,55 @@ VOCAB_SIZE = 64_000
 
 DATA_DIR = "local_data/train"
 OUTPUT_DIR = "custom_agentic_tokenizer"
-MAX_BATCH_EXAMPLES = int(os.getenv("TOKENIZER_MAX_BATCH_EXAMPLES", "128"))
-MAX_BATCH_CHARACTERS = int(os.getenv("TOKENIZER_MAX_BATCH_CHARACTERS", "2000000"))
-PARQUET_BATCH_SIZE = int(os.getenv("TOKENIZER_PARQUET_BATCH_SIZE", "256"))
-MAX_TEXT_CHARACTERS = int(os.getenv("TOKENIZER_MAX_TEXT_CHARACTERS", "2000"))
-MIN_FREQUENCY = int(os.getenv("TOKENIZER_MIN_FREQUENCY", "3"))
+def _resolve_profile():
+    """Select tokenizer training profile from env or runtime platform."""
+    explicit = os.getenv("TOKENIZER_PROFILE", "").strip().lower()
+    if explicit in {"kaggle", "standard"}:
+        return explicit
+
+    if os.getenv("KAGGLE_KERNEL_RUN_TYPE"):
+        return "kaggle"
+
+    return "standard"
+
+
+PROFILE = _resolve_profile()
+PROFILE_DEFAULTS = {
+    "standard": {
+        "max_batch_examples": "128",
+        "max_batch_characters": "2000000",
+        "parquet_batch_size": "256",
+        "max_text_characters": "2000",
+        "min_frequency": "3",
+        "max_unique_words": "300000",
+        "max_ram_gb": "30",
+    },
+    "kaggle": {
+        "max_batch_examples": "96",
+        "max_batch_characters": "1200000",
+        "parquet_batch_size": "192",
+        "max_text_characters": "1600",
+        "min_frequency": "3",
+        "max_unique_words": "200000",
+        "max_ram_gb": "13",
+    },
+}
+
+
+def _profile_default(name):
+    return PROFILE_DEFAULTS[PROFILE][name]
+
+
+MAX_BATCH_EXAMPLES = int(os.getenv("TOKENIZER_MAX_BATCH_EXAMPLES", _profile_default("max_batch_examples")))
+MAX_BATCH_CHARACTERS = int(os.getenv("TOKENIZER_MAX_BATCH_CHARACTERS", _profile_default("max_batch_characters")))
+PARQUET_BATCH_SIZE = int(os.getenv("TOKENIZER_PARQUET_BATCH_SIZE", _profile_default("parquet_batch_size")))
+MAX_TEXT_CHARACTERS = int(os.getenv("TOKENIZER_MAX_TEXT_CHARACTERS", _profile_default("max_text_characters")))
+MIN_FREQUENCY = int(os.getenv("TOKENIZER_MIN_FREQUENCY", _profile_default("min_frequency")))
 # Target unique word count that fits in RAM.  Each unique word costs ~15-20 KB
 # in the Rust BPE trainer (word string + character-level tokenisation + pair
-# counts + priority queue entries). 300K words is a safer default for 30 GB
-# machines when training on diverse web/code corpora.
-MAX_UNIQUE_WORDS = int(os.getenv("TOKENIZER_MAX_UNIQUE_WORDS", "300000"))
+# counts + priority queue entries). The Kaggle profile defaults to 200K for
+# better stability on constrained environments.
+MAX_UNIQUE_WORDS = int(os.getenv("TOKENIZER_MAX_UNIQUE_WORDS", _profile_default("max_unique_words")))
 
 def _corpus_bytes_for_ram(ram_gb):
     """Return a generous corpus byte cap as a first-pass limit.
@@ -55,7 +94,7 @@ def _corpus_bytes_for_ram(ram_gb):
     usable = max(ram_gb - 4, 0.5)
     return int(usable * 1_073_741_824)  # 1x — generous, since pass-2 filters
 
-MAX_RAM_GB = float(os.getenv("TOKENIZER_MAX_RAM_GB", "30"))
+MAX_RAM_GB = float(os.getenv("TOKENIZER_MAX_RAM_GB", _profile_default("max_ram_gb")))
 MAX_CORPUS_BYTES = _corpus_bytes_for_ram(MAX_RAM_GB)
 
 # These must be preserved as single tokens so the model can reason and format perfectly!
@@ -408,6 +447,7 @@ def main():
 
     print(
         f"\nTraining new vocabulary of size {VOCAB_SIZE}.\n"
+        f"Profile: {PROFILE} | "
         f"RAM budget: {MAX_RAM_GB:.0f} GB | "
         f"max unique words: {MAX_UNIQUE_WORDS:,} | "
         f"min_frequency: {MIN_FREQUENCY}"

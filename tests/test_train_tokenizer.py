@@ -313,6 +313,24 @@ class TestCorpusBytesForRam:
 
 
 # ---------------------------------------------------------------------------
+# profile defaults
+# ---------------------------------------------------------------------------
+
+class TestProfileResolution:
+    def test_explicit_profile_wins(self):
+        with mock.patch.dict(os.environ, {"TOKENIZER_PROFILE": "kaggle"}, clear=True):
+            assert tt._resolve_profile() == "kaggle"
+
+    def test_detects_kaggle_runtime(self):
+        with mock.patch.dict(os.environ, {"KAGGLE_KERNEL_RUN_TYPE": "Interactive"}, clear=True):
+            assert tt._resolve_profile() == "kaggle"
+
+    def test_defaults_to_standard(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            assert tt._resolve_profile() == "standard"
+
+
+# ---------------------------------------------------------------------------
 # _prune_counter
 # ---------------------------------------------------------------------------
 
