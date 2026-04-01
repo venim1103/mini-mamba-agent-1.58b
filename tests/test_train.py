@@ -73,7 +73,7 @@ class TestCreateSeqIdxBatch:
         cu_seqlens = torch.tensor([[0, 2, 5, 8]], dtype=torch.int32)
         n_segs = torch.tensor([4])
         seq_idx = create_seq_idx_batch(cu_seqlens, n_segs, 8)
-        expected = torch.tensor([[0, 0, 1, 1, 1, 2, 2, 2]], dtype=torch.int32)
+        expected = torch.tensor([[0, 0, 1, 1, 1, 2, 2, 2]], dtype=torch.int32, device=seq_idx.device)
         assert torch.equal(seq_idx, expected)
 
     def test_batch_size_two(self):

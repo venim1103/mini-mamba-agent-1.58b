@@ -202,7 +202,7 @@ class TestReasoningToggle:
 
     THINK_CONTENT = "Long chain of thought reasoning here."
     ANSWER = "The answer is 42."
-    FULL_RESPONSE = f"<think>{THINK_CONTENT}\n{ANSWER}"
+    FULL_RESPONSE = f"<think>{THINK_CONTENT}</think>\n{ANSWER}"
 
     def _make_dataset_with_row(self, reasoning_off_prob):
         tok = _make_tokenizer()
@@ -236,7 +236,7 @@ class TestReasoningToggle:
         ds = self._make_dataset_with_row(reasoning_off_prob=1.0)
         # Simulate stripping manually (mirrors dataset logic).
         content = self.FULL_RESPONSE
-        stripped = re.sub(r'<think>.*?\s*', '', content, flags=re.DOTALL).strip()
+        stripped = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
         assert "<think>" not in stripped
         assert self.ANSWER in stripped
 
@@ -248,12 +248,12 @@ class TestReasoningToggle:
 
     def test_strip_leaves_answer_intact(self):
         content = self.FULL_RESPONSE
-        stripped = re.sub(r'<think>.*?\s*', '', content, flags=re.DOTALL).strip()
+        stripped = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
         assert self.ANSWER in stripped
 
     def test_strip_removes_only_think_block(self):
-        content = "Preamble. <think>internal Final answer."
-        stripped = re.sub(r'<think>.*?\s*', '', content, flags=re.DOTALL).strip()
+        content = "Preamble. <think>internal</think> Final answer."
+        stripped = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
         assert "internal" not in stripped
         assert "Preamble" in stripped
         assert "Final answer" in stripped

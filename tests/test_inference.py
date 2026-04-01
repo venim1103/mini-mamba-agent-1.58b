@@ -6,27 +6,31 @@ class TestInferenceConstants:
     """Test inference.py constants."""
 
     def test_scout_mode_config(self):
-        with patch.dict("inference.__dict__", {"MODE": "scout"}):
-            from importlib import reload
-            import inference
-            reload(inference)
-            
-            assert inference.MODEL_CONFIG["vocab_size"] == 64000
-            assert inference.MODEL_CONFIG["dim"] == 512
-            assert inference.MODEL_CONFIG["n_layers"] == 24
-            assert inference.MODEL_CONFIG["d_state"] == 64
-            assert inference.MODEL_CONFIG["expand"] == 2
+        import inference
+
+        config, ckpt = inference.resolve_model_settings("scout")
+        assert config["vocab_size"] == 64000
+        assert config["dim"] == 512
+        assert config["n_layers"] == 24
+        assert config["d_state"] == 64
+        assert config["expand"] == 2
+        assert "bitmamba_scout" in ckpt
 
     def test_parent_mode_config(self):
-        with patch.dict("inference.__dict__", {"MODE": "parent"}):
-            from importlib import reload
-            import inference
-            reload(inference)
-            
-            assert inference.MODEL_CONFIG["vocab_size"] == 64000
-            assert inference.MODEL_CONFIG["dim"] == 1024
-            assert inference.MODEL_CONFIG["n_layers"] == 40
-            assert inference.MODEL_CONFIG["d_state"] == 128
+        import inference
+
+        config, ckpt = inference.resolve_model_settings("parent")
+        assert config["vocab_size"] == 64000
+        assert config["dim"] == 1024
+        assert config["n_layers"] == 40
+        assert config["d_state"] == 128
+        assert "bitmamba_parent" in ckpt
+
+    def test_invalid_mode_raises(self):
+        import inference
+
+        with pytest.raises(ValueError, match="Unsupported MODE"):
+            inference.resolve_model_settings("invalid")
 
     def test_checkpoint_paths_defined(self):
         from inference import CKPT_PATH, MODE

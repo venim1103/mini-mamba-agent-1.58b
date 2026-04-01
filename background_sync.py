@@ -23,31 +23,110 @@ REPO_ID = os.environ.get("REPO_ID")
 # =================================================================
 CHECKPOINT_DIR = "checkpoints"
 
-api = HfApi(token=HF_TOKEN)
-try:
-    api.create_repo(REPO_ID, repo_type="model", private=True)
-except Exception:
-    pass 
+def iter_new_checkpoint_files(checkpoint_dir: str, uploaded_files: set[str]):
+    """Yield unseen .pt checkpoint file paths under checkpoint_dir."""
+    if not os.path.exists(checkpoint_dir):
+        return
+    for root, _, files in os.walk(checkpoint_dir):
+        for file in files:
+            if not file.endswith(".pt"):
+                continue
+            filepath = os.path.join(root, file)
+            if filepath not in uploaded_files:
+                yield filepath
 
-uploaded_files = set()
-print(f"Watching {CHECKPOINT_DIR}/ for new .pt files...")
 
-while True:
-    if os.path.exists(CHECKPOINT_DIR):
-        for root, _, files in os.walk(CHECKPOINT_DIR):
-            for file in files:
-                if file.endswith(".pt"):
-                    filepath = os.path.join(root, file)
-                    if filepath not in uploaded_files:
-                        time.sleep(60) 
-                        try:
-                            path_in_repo = os.path.relpath(filepath, start=".")
-                            api.upload_file(
-                                path_or_fileobj=filepath, path_in_repo=path_in_repo,
-                                repo_id=REPO_ID, repo_type="model"
-                            )
-                            uploaded_files.add(filepath)
-                            print(f"Backed up {file}")
-                        except Exception as e:
-                            print(f"Upload failed {file}: {e}")
-    time.sleep(300) 
+def upload_checkpoint(
+    api: HfApi,
+    filepath: str,
+    repo_id: str,
+    uploaded_files: set[str],
+    *,
+    sleep_before_upload: int = 60,
+    sleep_fn=time.sleep,
+    logger=print,
+) -> bool:
+    """Upload a checkpoint file and record it in uploaded_files on success."""
+    sleep_fn(sleep_before_upload)
+    try:
+        path_in_repo = os.path.relpath(filepath, start=".")
+        api.upload_file(
+            path_or_fileobj=filepath,
+            path_in_repo=path_in_repo,
+            repo_id=repo_id,
+            repo_type="model",
+        )
+        uploaded_files.add(filepath)
+        logger(f"Backed up {os.path.basename(filepath)}")
+        return True
+    except Exception as exc:
+        logger(f"Upload failed {os.path.basename(filepath)}: {exc}")
+        return False
+
+
+def sync_once(
+    api: HfApi,
+    repo_id: str,
+    checkpoint_dir: str,
+    uploaded_files: set[str],
+    *,
+    sleep_before_upload: int = 60,
+    sleep_fn=time.sleep,
+    logger=print,
+) -> int:
+    """Perform one scan/upload cycle and return number of successful uploads."""
+    uploaded_count = 0
+    for filepath in iter_new_checkpoint_files(checkpoint_dir, uploaded_files):
+        if upload_checkpoint(
+            api,
+            filepath,
+            repo_id,
+            uploaded_files,
+            sleep_before_upload=sleep_before_upload,
+            sleep_fn=sleep_fn,
+            logger=logger,
+        ):
+            uploaded_count += 1
+    return uploaded_count
+
+
+def run_sync_loop(
+    api: HfApi,
+    repo_id: str,
+    checkpoint_dir: str = CHECKPOINT_DIR,
+    *,
+    poll_interval: int = 300,
+    sleep_before_upload: int = 60,
+    sleep_fn=time.sleep,
+    logger=print,
+):
+    """Run continuous sync loop."""
+    uploaded_files: set[str] = set()
+    logger(f"Watching {checkpoint_dir}/ for new .pt files...")
+    while True:
+        sync_once(
+            api,
+            repo_id,
+            checkpoint_dir,
+            uploaded_files,
+            sleep_before_upload=sleep_before_upload,
+            sleep_fn=sleep_fn,
+            logger=logger,
+        )
+        sleep_fn(poll_interval)
+
+
+def main():
+    if not REPO_ID:
+        raise ValueError("REPO_ID environment variable is required")
+    api = HfApi(token=HF_TOKEN)
+    try:
+        api.create_repo(REPO_ID, repo_type="model", private=True)
+    except Exception:
+        # Repository may already exist; keep syncing in either case.
+        pass
+    run_sync_loop(api, REPO_ID, CHECKPOINT_DIR)
+
+
+if __name__ == "__main__":
+    main()
