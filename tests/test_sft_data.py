@@ -286,4 +286,144 @@ class TestTokenizerFallbacks:
 
 
 from sft_data import _first_token_id
-from unittest.mock import MagicMock
+
+
+class TestFirstTokenId:
+    def test_prefers_primary_text_token(self):
+        tok = MagicMock()
+        tok.encode.side_effect = lambda text, add_special_tokens=False: [123] if text == "X" else [9]
+        assert _first_token_id(tok, "X", fallback_text="Y") == 123
+
+    def test_uses_fallback_text_when_primary_empty(self):
+        tok = MagicMock()
+        tok.eos_token_id = None
+        tok.pad_token_id = None
+        tok.unk_token_id = None
+
+        def _encode(text, add_special_tokens=False):
+            return {"X": [], "Y": [77]}.get(text, [])
+
+        tok.encode.side_effect = _encode
+        assert _first_token_id(tok, "X", fallback_text="Y") == 77
+
+    def test_uses_special_token_fallback_order(self):
+        tok = MagicMock()
+        tok.encode.return_value = []
+        tok.eos_token_id = None
+        tok.pad_token_id = 55
+        tok.unk_token_id = 66
+        assert _first_token_id(tok, "X") == 55
+
+    def test_returns_zero_when_no_options_exist(self):
+        tok = MagicMock()
+        tok.encode.return_value = []
+        tok.eos_token_id = None
+        tok.pad_token_id = None
+        tok.unk_token_id = None
+        assert _first_token_id(tok, "X") == 0
+
+
+class TestSFTDatasetInitRouting:
+    def _tok(self):
+        tok = MagicMock()
+        tok.eos_token_id = 1
+        tok.pad_token_id = 0
+        tok.encode.side_effect = lambda text, add_special_tokens=False: {
+            "<|im_start|>": [3],
+            "<|im_end|>": [4],
+            "\n": [5],
+            " ": [6],
+        }.get(text, [11])
+        return tok
+
+    def test_directory_json_hint_uses_json_only_files(self):
+        tok = self._tok()
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.walk", return_value=[("/tmp", [], ["a.parquet", "b.jsonl", "c.json"])]), \
+             patch("sft_data.load_dataset", return_value=[{"messages": [{"role": "user", "content": "hi"}]}]) as ld:
+            SFTChatDataset("/tmp", tok, format_hint="json")
+
+        ld.assert_called_once_with("json", data_files=["/tmp/c.json"], split="train")
+
+    def test_directory_without_supported_files_raises(self):
+        tok = self._tok()
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.walk", return_value=[("/tmp", [], ["readme.md"])]):
+            with pytest.raises(FileNotFoundError, match="No .json/.jsonl/.parquet files"):
+                SFTChatDataset("/tmp", tok)
+
+
+class TestSFTDatasetGetItem:
+    def _dataset_for_rows(self, rows, tokenizer, reasoning_off_prob=0.0):
+        ds = SFTChatDataset.__new__(SFTChatDataset)
+        ds.tokenizer = tokenizer
+        ds.max_seq_len = 64
+        ds.reasoning_off_prob = reasoning_off_prob
+        ds.im_start = 3
+        ds.im_end = 4
+        ds.nl = 5
+        ds.sys_reasoning_on = "Think"
+        ds.sys_reasoning_off = "Direct"
+        ds.raw_data = rows
+        return ds
+
+    def test_getitem_empty_messages_returns_eos_and_ignore(self):
+        tok = MagicMock()
+        tok.eos_token_id = 9
+        tok.encode.return_value = [1]
+        ds = self._dataset_for_rows([{}], tok)
+        ids, labels = ds[0]
+        assert torch.equal(ids, torch.tensor([9], dtype=torch.long))
+        assert torch.equal(labels, torch.tensor([-100], dtype=torch.long))
+
+    def test_getitem_conversation_role_mapping_and_labeling(self):
+        tok = MagicMock()
+
+        def _encode(text, add_special_tokens=False):
+            mapping = {
+                "system": [10],
+                "user": [11],
+                "assistant": [12],
+                "Think": [13],
+                "hello": [14, 15],
+                "world": [16, 17],
+            }
+            return mapping.get(text, [99])
+
+        tok.encode.side_effect = _encode
+        tok.eos_token_id = 1
+        row = {"conversations": [{"from": "human", "value": "hello"}, {"from": "gpt", "value": "world"}]}
+        ds = self._dataset_for_rows([row], tok, reasoning_off_prob=0.0)
+
+        ids, labels = ds[0]
+        assert ids.numel() == labels.numel()
+        # There should be supervised assistant tokens and masked user/system tokens.
+        assert (labels != -100).any()
+        assert (labels == -100).any()
+
+    def test_getitem_strips_think_content_when_reasoning_off(self):
+        tok = MagicMock()
+        observed_contents = []
+
+        def _encode(text, add_special_tokens=False):
+            if text in {"system", "assistant", "user", "Direct"}:
+                return [1]
+            if "<think>" in text or "answer" in text:
+                observed_contents.append(text)
+            return [2]
+
+        tok.encode.side_effect = _encode
+        tok.eos_token_id = 1
+        row = {
+            "messages": [
+                {"role": "assistant", "content": "<think>hidden</think> answer"},
+            ]
+        }
+        ds = self._dataset_for_rows([row], tok, reasoning_off_prob=1.0)
+
+        with patch("random.random", return_value=0.0):
+            ds[0]
+
+        # Content passed for encoding should be stripped down to visible answer.
+        assert "answer" in observed_contents
+        assert all("<think>" not in text for text in observed_contents)

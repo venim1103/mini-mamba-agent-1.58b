@@ -103,6 +103,44 @@ class TestUpscaleFunction:
             # Since layer type is incompatible, target layer should remain random-init value.
             assert torch.equal(saved_state["layers.32.norm.weight"], big_state["layers.32.norm.weight"])
 
+    def test_transplants_compatible_layer_when_source_exists(self):
+        import upscale
+
+        with patch("torch.load") as mock_load, \
+             patch("torch.save") as mock_save, \
+             patch("upscale.BitMambaLLM") as MockModel:
+            transplanted = torch.full((4,), 7.0)
+            small_state = {
+                "layers.8.norm.weight": transplanted,
+                "tok_embeddings.weight": torch.randn(2, 2),
+                "norm.weight": torch.randn(2),
+                "output.weight": torch.randn(2, 2),
+            }
+            mock_load.return_value = {"model_state_dict": small_state}
+
+            big_state = {
+                "layers.32.norm.weight": torch.full((4,), 1.0),
+                "tok_embeddings.weight": torch.randn(2, 2),
+                "norm.weight": torch.randn(2),
+                "output.weight": torch.randn(2, 2),
+            }
+
+            big_model = MagicMock()
+            big_model.state_dict.return_value = big_state.copy()
+            # Layer 32 maps to source layer 8 and should be compatible when both are non-attn.
+            big_model.attn_indices = set()
+
+            small_model_tmp = MagicMock()
+            small_model_tmp.attn_indices = set()
+
+            MockModel.side_effect = [big_model, small_model_tmp]
+
+            upscale.upscaler("dummy_small.pt", "dummy_out.pt")
+
+            saved_payload = mock_save.call_args[0][0]
+            saved_state = saved_payload["model_state_dict"]
+            assert torch.equal(saved_state["layers.32.norm.weight"], transplanted)
+
 
 class TestUpscaleModelConfig:
     """Test upscale.py creates correct model configs."""
