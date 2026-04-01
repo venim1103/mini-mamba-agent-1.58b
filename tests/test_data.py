@@ -3,13 +3,16 @@ import torch
 import sys
 from unittest.mock import MagicMock
 
-# Mock datasets and huggingface_hub BEFORE importing data.py to prevent import errors
-# The datasets package has a version compatibility issue with huggingface_hub in CI
+# Mock ALL heavy dependencies BEFORE importing data.py to prevent import errors
+# The datasets/transformers packages have version compatibility issues with huggingface_hub in CI
 _mocked_modules = {
     'datasets': MagicMock(),
     'datasets.load_dataset': MagicMock(),
+    'transformers': MagicMock(),
+    'transformers.AutoTokenizer': MagicMock(),
     'huggingface_hub': MagicMock(),
     'huggingface_hub.utils': MagicMock(),
+    'huggingface_hub.file_download': MagicMock(),
 }
 
 for _name, _obj in _mocked_modules.items():
