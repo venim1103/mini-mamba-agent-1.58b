@@ -189,9 +189,9 @@ The tokenizer trainer uses a **two-pass approach** to keep memory bounded on any
 1. **Pass 1 — Word census:** Streams all local `.jsonl`, `.json`, and `.parquet` files through the template tokenizer's pre-tokenizer, counting word frequencies in a Python `Counter`. Memory usage: O(unique words), typically 200–500 MB.
 2. **Filtering:** Drops words appearing fewer than `MIN_FREQUENCY` times, then caps at `MAX_UNIQUE_WORDS`.
     The script has two default profiles:
-    - `standard` (default outside Kaggle): 300K words
+    - `standard` (default outside Kaggle): 200K words
     - `kaggle` (auto when `KAGGLE_KERNEL_RUN_TYPE` is set): 200K words
-    This keeps merge-phase memory under control on constrained machines.
+    This keeps merge-phase memory under control on constrained machines, but for the most reliable low-RAM training path use the separate SentencePiece trainer below.
 3. **Pass 2 — Filtered training:** Streams the data again, stripping any rare words not in the allowed set, and feeds the cleaned text to the BPE trainer. The trainer only ever sees the allowed vocabulary, keeping RAM predictable regardless of corpus size.
 
 ```bash
@@ -208,22 +208,22 @@ TOKENIZER_PROFILE=kaggle TOKENIZER_MAX_UNIQUE_WORDS=100000 python train_tokenize
 | Profile | Suggested MAX_UNIQUE_WORDS | Approx peak RAM |
 |---|---|---|
 | kaggle | 200,000 (default on Kaggle) | ~5–10 GB |
-| standard | 300,000 (default elsewhere) | ~8–14 GB |
+| standard | 200,000 (default elsewhere) | ~5–10 GB |
 
 Optional controls:
 
 - `TOKENIZER_PROFILE`: `standard` or `kaggle` (default: auto-detect)
 - `TOKENIZER_MAX_RAM_GB`: your available RAM in GB; sets a generous corpus byte cap (default: `30` standard, `13` kaggle)
-- `TOKENIZER_MAX_UNIQUE_WORDS`: max unique pre-tokenized words the BPE trainer will see (default: `300000` standard, `200000` kaggle)
+- `TOKENIZER_MAX_UNIQUE_WORDS`: max unique pre-tokenized words the BPE trainer will see (default: `200000` standard, `200000` kaggle)
 - `TOKENIZER_MIN_FREQUENCY`: minimum word frequency to be included in training (default: `3`)
 - `TOKENIZER_MAX_TEXT_CHARACTERS`: per-document truncation limit (default: `2000` standard, `1600` kaggle; set to `0` to disable)
 - `TOKENIZER_MAX_BATCH_EXAMPLES`: max documents buffered before flushing to the trainer (default: `128` standard, `96` kaggle)
 - `TOKENIZER_MAX_BATCH_CHARACTERS`: max total characters buffered before flushing (default: `2000000` standard, `1200000` kaggle)
 - `TOKENIZER_PARQUET_BATCH_SIZE`: rows read at a time from parquet files (default: `256` standard, `192` kaggle)
 
-### 2b. Alternate Low-RAM Tokenizer (SentencePiece)
+### 2b. Recommended Low-RAM Tokenizer (SentencePiece)
 
-For tighter memory limits (for example Kaggle no-swap environments), use the separate SentencePiece trainer:
+For tighter memory limits, or if the Hugging Face BPE path still OOMs during `Tokenize words` / `Compute merges`, use the separate SentencePiece trainer:
 
 ```bash
 python train_tokenizer_spm.py --profile kaggle --model-type bpe --vocab-size 64000

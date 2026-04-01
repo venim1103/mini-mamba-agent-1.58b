@@ -55,7 +55,7 @@ PROFILE_DEFAULTS = {
         "parquet_batch_size": "256",
         "max_text_characters": "2000",
         "min_frequency": "3",
-        "max_unique_words": "300000",
+        "max_unique_words": "200000",
         "max_ram_gb": "30",
     },
     "kaggle": {
@@ -81,8 +81,8 @@ MAX_TEXT_CHARACTERS = int(os.getenv("TOKENIZER_MAX_TEXT_CHARACTERS", _profile_de
 MIN_FREQUENCY = int(os.getenv("TOKENIZER_MIN_FREQUENCY", _profile_default("min_frequency")))
 # Target unique word count that fits in RAM.  Each unique word costs ~15-20 KB
 # in the Rust BPE trainer (word string + character-level tokenisation + pair
-# counts + priority queue entries). The Kaggle profile defaults to 200K for
-# better stability on constrained environments.
+# counts + priority queue entries). Both built-in profiles use conservative
+# defaults because the Rust BPE merge phase can still OOM below 64 GB RAM.
 MAX_UNIQUE_WORDS = int(os.getenv("TOKENIZER_MAX_UNIQUE_WORDS", _profile_default("max_unique_words")))
 
 def _corpus_bytes_for_ram(ram_gb):

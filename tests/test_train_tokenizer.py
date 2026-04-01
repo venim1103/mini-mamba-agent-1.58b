@@ -329,6 +329,12 @@ class TestProfileResolution:
         with mock.patch.dict(os.environ, {}, clear=True):
             assert tt._resolve_profile() == "standard"
 
+    def test_standard_profile_uses_conservative_unique_word_default(self):
+        assert tt.PROFILE_DEFAULTS["standard"]["max_unique_words"] == "200000"
+
+    def test_kaggle_profile_uses_conservative_unique_word_default(self):
+        assert tt.PROFILE_DEFAULTS["kaggle"]["max_unique_words"] == "200000"
+
 
 # ---------------------------------------------------------------------------
 # _prune_counter
