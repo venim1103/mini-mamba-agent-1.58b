@@ -3,12 +3,15 @@ import pytest
 import sys
 from unittest.mock import MagicMock
 
-# Mock datasets and huggingface_hub BEFORE importing rl_train.py to prevent import errors
+# Mock ALL heavy dependencies BEFORE importing rl_train.py to prevent import errors
 _mocked_modules = {
     'datasets': MagicMock(),
     'datasets.load_dataset': MagicMock(),
+    'transformers': MagicMock(),
+    'transformers.AutoTokenizer': MagicMock(),
     'huggingface_hub': MagicMock(),
     'huggingface_hub.utils': MagicMock(),
+    'huggingface_hub.file_download': MagicMock(),
 }
 
 for _name, _obj in _mocked_modules.items():
