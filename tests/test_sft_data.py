@@ -4,7 +4,21 @@
 import re
 import pytest
 import torch
+import sys
 from unittest.mock import MagicMock, patch
+
+# Mock datasets and huggingface_hub BEFORE importing sft_data.py to prevent import errors
+_mocked_modules = {
+    'datasets': MagicMock(),
+    'datasets.load_dataset': MagicMock(),
+    'huggingface_hub': MagicMock(),
+    'huggingface_hub.utils': MagicMock(),
+}
+
+for _name, _obj in _mocked_modules.items():
+    if _name not in sys.modules:
+        sys.modules[_name] = _obj
+
 
 from sft_data import sft_collate_fn, SFTChatDataset
 
@@ -145,7 +159,7 @@ class TestRowToMessages:
         assert len(msgs) == 2
 
     def test_math_reasoning_format(self, dataset):
-        row = {"problem": "2+2=?", "generated_solution": "<think>Compute.</think>4"}
+        row = {"problem": "2+2=?", "generated_solution": "<think>Compute.4"}
         msgs = dataset._row_to_messages(row)
         assert len(msgs) == 2
         assert msgs[0]["role"] == "user"
@@ -184,11 +198,11 @@ class TestRowToMessages:
 # ===========================================================================
 
 class TestReasoningToggle:
-    """Verify that <think>...</think> blocks are stripped when reasoning_off_prob=1."""
+    """Verify that <think>... blocks are stripped when reasoning_off_prob=1."""
 
     THINK_CONTENT = "Long chain of thought reasoning here."
     ANSWER = "The answer is 42."
-    FULL_RESPONSE = f"<think>{THINK_CONTENT}</think>\n{ANSWER}"
+    FULL_RESPONSE = f"<think>{THINK_CONTENT}\n{ANSWER}"
 
     def _make_dataset_with_row(self, reasoning_off_prob):
         tok = _make_tokenizer()
@@ -222,7 +236,7 @@ class TestReasoningToggle:
         ds = self._make_dataset_with_row(reasoning_off_prob=1.0)
         # Simulate stripping manually (mirrors dataset logic).
         content = self.FULL_RESPONSE
-        stripped = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
+        stripped = re.sub(r'<think>.*?\s*', '', content, flags=re.DOTALL).strip()
         assert "<think>" not in stripped
         assert self.ANSWER in stripped
 
@@ -234,12 +248,12 @@ class TestReasoningToggle:
 
     def test_strip_leaves_answer_intact(self):
         content = self.FULL_RESPONSE
-        stripped = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
+        stripped = re.sub(r'<think>.*?\s*', '', content, flags=re.DOTALL).strip()
         assert self.ANSWER in stripped
 
     def test_strip_removes_only_think_block(self):
-        content = "Preamble. <think>internal</think> Final answer."
-        stripped = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
+        content = "Preamble. <think>internal Final answer."
+        stripped = re.sub(r'<think>.*?\s*', '', content, flags=re.DOTALL).strip()
         assert "internal" not in stripped
         assert "Preamble" in stripped
         assert "Final answer" in stripped
@@ -273,4 +287,3 @@ class TestTokenizerFallbacks:
 
 from sft_data import _first_token_id
 from unittest.mock import MagicMock
-
