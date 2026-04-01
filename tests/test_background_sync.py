@@ -1,18 +1,6 @@
 import pytest
 import time
 from unittest.mock import MagicMock, patch, PropertyMock
-import sys
-
-# Mock heavy dependencies
-mock_modules = {
-    'huggingface_hub': MagicMock(),
-    'huggingface_hub.HfApi': MagicMock(),
-    'time': MagicMock(),
-    'os': MagicMock(),
-}
-for name, obj in mock_modules.items():
-    if name not in sys.modules:
-        sys.modules[name] = obj
 
 
 class TestBackgroundSyncConstants:
@@ -31,17 +19,25 @@ class TestBackgroundSyncSetup:
         assert isinstance(uploaded_files, set)
 
     def test_hf_token_from_env(self):
-        with patch.dict("os.environ", {"HF_TOKEN": "test_token"}):
+        original = "test_token"
+        import os
+        os.environ["HF_TOKEN"] = original
+        try:
             from importlib import reload
             import background_sync
             reload(background_sync)
-            
-            assert background_sync.HF_TOKEN == "test_token"
+            assert background_sync.HF_TOKEN == original
+        finally:
+            del os.environ["HF_TOKEN"]
 
     def test_repo_id_from_env(self):
-        with patch.dict("os.environ", {"REPO_ID": "test/repo"}):
+        original = "test/repo"
+        import os
+        os.environ["REPO_ID"] = original
+        try:
             from importlib import reload
             import background_sync
             reload(background_sync)
-            
-            assert background_sync.REPO_ID == "test/repo"
+            assert background_sync.REPO_ID == original
+        finally:
+            del os.environ["REPO_ID"]

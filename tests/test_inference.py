@@ -1,20 +1,5 @@
 import pytest
 from unittest.mock import MagicMock, patch
-import sys
-
-# Mock heavy dependencies
-mock_modules = {
-    'torch': MagicMock(),
-    'torch.cuda': MagicMock(),
-    'transformers': MagicMock(),
-    'transformers.AutoTokenizer': MagicMock(),
-    'model': MagicMock(),
-    'model.BitMambaLLM': MagicMock(),
-    'model.maybe_autocast': MagicMock(),
-}
-for name, obj in mock_modules.items():
-    if name not in sys.modules:
-        sys.modules[name] = obj
 
 
 class TestInferenceConstants:

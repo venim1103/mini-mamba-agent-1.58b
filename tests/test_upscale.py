@@ -1,19 +1,6 @@
 import pytest
 import torch
 from unittest.mock import MagicMock, patch, mock_open
-import os
-import sys
-
-# Mock heavy dependencies
-mock_modules = {
-    'torch': MagicMock(),
-    'torch.nn': MagicMock(),
-    'model': MagicMock(),
-    'model.BitMambaLLM': MagicMock(),
-}
-for name, obj in mock_modules.items():
-    if name not in sys.modules:
-        sys.modules[name] = obj
 
 
 class TestUpscaleFunction:

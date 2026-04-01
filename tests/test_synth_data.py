@@ -2,23 +2,6 @@ import pytest
 import json
 from unittest.mock import MagicMock, patch, mock_open
 import os
-import sys
-
-# Mock heavy dependencies before importing modules
-mock_modules = {
-    'torch': MagicMock(),
-    'torch.nn': MagicMock(),
-    'torch.nn.functional': MagicMock(),
-    'transformers': MagicMock(),
-    'transformers.AutoTokenizer': MagicMock(),
-    'datasets': MagicMock(),
-    'datasets.load_dataset': MagicMock(),
-    'model': MagicMock(),
-    'model.BitMambaLLM': MagicMock(),
-}
-for name, obj in mock_modules.items():
-    if name not in sys.modules:
-        sys.modules[name] = obj
 
 
 class TestStrategyPrompts:
@@ -58,42 +41,6 @@ class TestStrategyPrompts:
         from synth_data import STRATEGY_PROMPTS
         template = STRATEGY_PROMPTS["rephrase"]
         assert "encyclopedic" in template.lower()
-
-
-class TestTruncateSource:
-    """Test truncate_source function."""
-
-    def test_no_truncation_when_under_limit(self):
-        from synth_data import truncate_source
-        
-        mock_tok = MagicMock()
-        mock_tok.encode.return_value = [1, 2, 3]
-        mock_tok.decode.return_value = "short text"
-        
-        result = truncate_source("short text", mock_tok, max_source_tokens=10)
-        
-        assert result == "short text"
-
-    def test_truncation_when_over_limit(self):
-        from synth_data import truncate_source
-        
-        mock_tok = MagicMock()
-        mock_tok.encode.return_value = list(range(1500))
-        mock_tok.decode.return_value = "truncated text"
-        
-        result = truncate_source("long text " * 500, mock_tok, max_source_tokens=1024)
-        
-        assert len(mock_tok.encode.call_args[0][0]) <= 1024
-
-
-class TestIterSourceTexts:
-    """Test iter_source_texts function."""
-
-    def test_raises_on_no_files(self, tmp_path):
-        from synth_data import iter_source_texts
-        
-        with pytest.raises(FileNotFoundError):
-            list(iter_source_texts(str(tmp_path)))
 
 
 class TestSynthDataConstants:

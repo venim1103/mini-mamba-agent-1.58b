@@ -1,17 +1,5 @@
 import pytest
 from unittest.mock import MagicMock, patch, mock_open
-import os
-import sys
-
-# Mock heavy dependencies before importing
-mock_modules = {
-    'kaggle_secrets': MagicMock(),
-    'kaggle_secrets.UserSecretsClient': MagicMock(),
-    'subprocess': MagicMock(),
-}
-for name, obj in mock_modules.items():
-    if name not in sys.modules:
-        sys.modules[name] = obj
 
 
 class TestKaggleWatchdog:
