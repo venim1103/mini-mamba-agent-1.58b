@@ -1,4 +1,5 @@
 import pytest
+import torch
 from unittest.mock import MagicMock, patch
 
 
@@ -54,3 +55,64 @@ class TestInferenceImports:
         )
         assert BitMambaLLM is not None
         assert maybe_autocast is not None
+
+
+class TestInferenceRuntime:
+    def test_generate_stops_on_eos(self):
+        import inference
+
+        class _Tok:
+            def __call__(self, prompt, return_tensors="pt"):
+                return type("TokOut", (), {"input_ids": torch.tensor([[5, 6]])})
+
+            def encode(self, text, add_special_tokens=False):
+                return [99]
+
+            def decode(self, ids, skip_special_tokens=False):
+                return "decoded"
+
+        model = MagicMock()
+        model.generate.return_value = torch.tensor([[5, 6, 99]])
+
+        with patch("builtins.print"):
+            inference.generate(model, _Tok(), prompt="hello", max_new_tokens=8, temperature=0.0)
+
+        model.eval.assert_called_once()
+        model.generate.assert_called_once()
+        kwargs = model.generate.call_args.kwargs
+        assert kwargs["eos_token_id"] == 99
+        assert kwargs["max_new_tokens"] == 8
+
+    def test_main_success_path_prepares_model_for_inference(self):
+        import inference
+
+        fake_state = {"model_state_dict": {"w": torch.tensor([1.0])}}
+        model_instance = MagicMock()
+        model_instance.to.return_value = model_instance
+
+        with patch.object(inference, "AutoTokenizer") as tok_cls, \
+             patch.object(inference, "BitMambaLLM", return_value=model_instance), \
+             patch.object(inference.torch, "load", return_value=fake_state), \
+             patch.object(inference, "generate") as gen_fn, \
+             patch("builtins.print"):
+            tok_cls.from_pretrained.return_value = MagicMock()
+            rc = inference.main()
+
+        assert rc == 0
+        model_instance.load_state_dict.assert_called_once_with(fake_state["model_state_dict"])
+        model_instance.prepare_for_inference.assert_called_once()
+        gen_fn.assert_called_once()
+
+    def test_main_returns_one_when_checkpoint_missing(self):
+        import inference
+
+        model_instance = MagicMock()
+        with patch.object(inference, "AutoTokenizer") as tok_cls, \
+             patch.object(inference, "BitMambaLLM", return_value=model_instance), \
+             patch.object(inference.torch, "load", side_effect=FileNotFoundError), \
+             patch("builtins.print"):
+            tok_cls.from_pretrained.return_value = MagicMock()
+            rc = inference.main()
+
+        assert rc == 1
+        model_instance.prepare_for_inference.assert_not_called()

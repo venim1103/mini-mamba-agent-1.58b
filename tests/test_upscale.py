@@ -64,6 +64,45 @@ class TestUpscaleFunction:
             assert 'model_state_dict' in call_args
             assert call_args['requires_continued_pretraining'] == True
 
+    def test_skips_incompatible_layer_types(self):
+        import upscale
+
+        with patch("torch.load") as mock_load, \
+             patch("torch.save") as mock_save, \
+             patch("upscale.BitMambaLLM") as MockModel:
+            small_state = {
+                "layers.8.norm.weight": torch.full((4,), 3.0),
+                "tok_embeddings.weight": torch.randn(2, 2),
+                "norm.weight": torch.randn(2),
+                "output.weight": torch.randn(2, 2),
+            }
+            mock_load.return_value = {"model_state_dict": small_state}
+
+            big_state = {
+                "layers.32.norm.weight": torch.full((4,), 9.0),
+                "tok_embeddings.weight": torch.randn(2, 2),
+                "norm.weight": torch.randn(2),
+                "output.weight": torch.randn(2, 2),
+            }
+
+            # First call: big model with attn at layer 32.
+            big_model = MagicMock()
+            big_model.state_dict.return_value = big_state.copy()
+            big_model.attn_indices = {32}
+
+            # Second call: small model temp with no attention.
+            small_model_tmp = MagicMock()
+            small_model_tmp.attn_indices = set()
+
+            MockModel.side_effect = [big_model, small_model_tmp]
+
+            upscale.upscaler("dummy_small.pt", "dummy_out.pt")
+
+            saved_payload = mock_save.call_args[0][0]
+            saved_state = saved_payload["model_state_dict"]
+            # Since layer type is incompatible, target layer should remain random-init value.
+            assert torch.equal(saved_state["layers.32.norm.weight"], big_state["layers.32.norm.weight"])
+
 
 class TestUpscaleModelConfig:
     """Test upscale.py creates correct model configs."""
