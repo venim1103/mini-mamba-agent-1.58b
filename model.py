@@ -185,11 +185,44 @@ class BitLinear(nn.Module):
         else:
             self.register_parameter('bias', None)
         self.norm = nn.LayerNorm(in_features, elementwise_affine=False)
+        self.register_buffer('_cached_quant_weight', None, persistent=False)
+        self._cached_quant_weight_version = -1
+
+    def _clear_inference_cache(self):
+        self._cached_quant_weight = None
+        self._cached_quant_weight_version = -1
+
+    def _get_quantized_weight(self):
+        if self.training:
+            return weight_quant(self.weight)
+
+        weight_version = getattr(self.weight, '_version', None)
+        cache_is_stale = (
+            self._cached_quant_weight is None
+            or self._cached_quant_weight.device != self.weight.device
+            or self._cached_quant_weight.dtype != self.weight.dtype
+            or self._cached_quant_weight_version != weight_version
+        )
+        if cache_is_stale:
+            with torch.no_grad():
+                self._cached_quant_weight = weight_quant(self.weight).detach()
+            self._cached_quant_weight_version = weight_version
+        return self._cached_quant_weight
+
+    def prepare_for_inference(self):
+        self.eval()
+        self._get_quantized_weight()
+        return self
+
+    def train(self, mode=True):
+        if mode:
+            self._clear_inference_cache()
+        return super().train(mode)
 
     def forward(self, x):
         x_norm = self.norm(x)
         x_quant = activation_quant(x_norm)
-        w_quant = weight_quant(self.weight)
+        w_quant = self._get_quantized_weight()
         return F.linear(x_quant, w_quant, self.bias)
 
 class RMSNorm(nn.Module):
@@ -647,6 +680,13 @@ class BitMambaLLM(nn.Module):
         """Return pre-logit hidden states (G2: for chunked cross-entropy)."""
         return self._backbone(input_ids, seq_idx)
 
+    def prepare_for_inference(self):
+        self.eval()
+        for module in self.modules():
+            if isinstance(module, BitLinear):
+                module.prepare_for_inference()
+        return self
+
     @torch.no_grad()
     def generate(self, input_ids, max_new_tokens=512, temperature=0.7,
                  do_sample=True, eos_token_id=None):
@@ -655,7 +695,7 @@ class BitMambaLLM(nn.Module):
         Prefills the prompt in one pass, then decodes one token at a time
         using per-layer conv/SSM state (Mamba blocks) and KV cache (attention blocks).
         """
-        self.eval()
+        self.prepare_for_inference()
 
         # --- Prefill: process the full prompt ---
         x = self.tok_embeddings(input_ids)
@@ -691,7 +731,7 @@ class BitMambaLLM(nn.Module):
         return generated
 
 
-def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024, ignore_index=-100):
+def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024, ignore_index=-100, return_stats=False):
     """Compute cross-entropy without materializing the full logits tensor.
 
     Instead of computing logits for the entire sequence at once (which for
@@ -706,7 +746,8 @@ def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024, ignore_
         ignore_index: int — label to ignore in loss (default -100)
 
     Returns:
-        Scalar loss (mean cross-entropy over all tokens).
+        Scalar loss (mean cross-entropy over all tokens), or a tuple of
+        ``(total_loss_sum, valid_tokens)`` when ``return_stats=True``.
     """
     bs, seq_len, _ = hidden.shape
     total_loss = 0.0
@@ -723,5 +764,7 @@ def chunked_cross_entropy(hidden, output_proj, targets, chunk_size=1024, ignore_
             ignore_index=ignore_index,
         )
 
+    if return_stats:
+        return total_loss, valid_tokens
     return total_loss / valid_tokens
 

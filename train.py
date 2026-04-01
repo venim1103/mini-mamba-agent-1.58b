@@ -209,13 +209,11 @@ def main():
         previous_phase = phase_name
         
         for opt in [muon_opt, adam_opt, mamba_core_opt]: opt.zero_grad()
-        accumulated_loss = 0.0
+        accumulated_loss_sum = 0.0
+        accumulated_valid_tokens = 0
         
         for _ in range(GRAD_ACCUM_STEPS):
-            try: x, y, cu_seqlens, n_segs = next(data_iter)
-            except StopIteration:
-                data_iter = iter(train_loader)
-                x, y, cu_seqlens, n_segs = next(data_iter)
+            x, y, cu_seqlens, n_segs = next(data_iter)
             
             x, y = x.to(DEVICE)[:, :current_ctx], y.to(DEVICE)[:, :current_ctx]
             seq_idx = create_seq_idx_batch(cu_seqlens, n_segs, current_ctx)
@@ -223,14 +221,31 @@ def main():
             with maybe_autocast(DEVICE, amp_dtype=AMP_DTYPE):
                 # G2: Chunked cross-entropy avoids materializing full [BS, ctx, vocab] logits
                 hidden = model.forward_hidden(x, seq_idx=seq_idx)
-                loss = chunked_cross_entropy(hidden, raw_model.output, y) / GRAD_ACCUM_STEPS
-            scaler.scale(loss).backward()
-            accumulated_loss += loss.item()
+                loss_sum, valid_tokens = chunked_cross_entropy(
+                    hidden,
+                    raw_model.output,
+                    y,
+                    return_stats=True,
+                )
+            scaler.scale(loss_sum).backward()
+            accumulated_loss_sum += loss_sum.detach().item()
+            accumulated_valid_tokens += valid_tokens.detach().item()
             
         for opt in [muon_opt, adam_opt, mamba_core_opt]: scaler.unscale_(opt)
+        global_valid_tokens = accumulated_valid_tokens
+        if world_size > 1:
+            valid_token_tensor = torch.tensor(accumulated_valid_tokens, device=DEVICE, dtype=torch.float32)
+            torch.distributed.all_reduce(valid_token_tensor, op=torch.distributed.ReduceOp.SUM)
+            global_valid_tokens = valid_token_tensor.item()
+        grad_scale = world_size / max(global_valid_tokens, 1.0)
+        for param in model.parameters():
+            if param.grad is not None:
+                param.grad.mul_(grad_scale)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         for opt in [muon_opt, adam_opt, mamba_core_opt]: scaler.step(opt)
         scaler.update()
+
+        accumulated_loss = accumulated_loss_sum * grad_scale
         
         # Fix #7: Count tokens every step, not just every 10 steps
         tokens_this_step = BATCH_SIZE * GRAD_ACCUM_STEPS * current_ctx

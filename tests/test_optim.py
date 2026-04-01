@@ -63,6 +63,13 @@ class TestMuon:
         optim.step()
         assert optim.state[p]["momentum_buffer"].shape == p.shape
 
+    def test_step_workspace_is_not_persisted_in_optimizer_state(self):
+        p = _tiny_linear_param((8, 4))
+        optim = Muon([p], lr=0.01)
+        p.grad = torch.ones_like(p)
+        optim.step()
+        assert set(optim.state[p].keys()) == {"momentum_buffer"}
+
     def test_lr_zero_gives_no_update(self):
         p = _tiny_linear_param()
         optim = Muon([p], lr=0.0)

@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import model as model_module
 
 from model import (
     weight_quant,
@@ -123,6 +124,44 @@ class TestBitLinear:
         out1 = layer(x)
         out2 = layer(x)
         assert torch.allclose(out1, out2)
+
+    def test_eval_reuses_cached_quantized_weights(self, device, monkeypatch):
+        layer = BitLinear(16, 8).to(device).eval()
+        x = torch.randn(1, 4, 16, device=device)
+        call_count = 0
+        original_weight_quant = model_module.weight_quant
+
+        def counting_weight_quant(weight):
+            nonlocal call_count
+            call_count += 1
+            return original_weight_quant(weight)
+
+        monkeypatch.setattr(model_module, "weight_quant", counting_weight_quant)
+
+        layer(x)
+        layer(x)
+
+        assert call_count == 1
+
+    def test_train_mode_clears_cached_quantized_weights(self, device, monkeypatch):
+        layer = BitLinear(16, 8).to(device).eval()
+        x = torch.randn(1, 4, 16, device=device)
+        call_count = 0
+        original_weight_quant = model_module.weight_quant
+
+        def counting_weight_quant(weight):
+            nonlocal call_count
+            call_count += 1
+            return original_weight_quant(weight)
+
+        monkeypatch.setattr(model_module, "weight_quant", counting_weight_quant)
+
+        layer(x)
+        layer.train()
+        layer.eval()
+        layer(x)
+
+        assert call_count == 2
 
 
 # ===========================================================================
@@ -549,6 +588,20 @@ class TestChunkedCrossEntropy:
         with torch.no_grad():
             loss = chunked_cross_entropy(hidden, proj, targets, chunk_size=8)
         assert loss.ndim == 0
+
+    def test_return_stats_matches_mean_loss(self, proj_and_data, device):
+        proj, hidden, targets = proj_and_data
+        proj.eval()
+        with torch.no_grad():
+            loss = chunked_cross_entropy(hidden, proj, targets, chunk_size=8)
+            loss_sum, valid_tokens = chunked_cross_entropy(
+                hidden,
+                proj,
+                targets,
+                chunk_size=8,
+                return_stats=True,
+            )
+        assert torch.allclose(loss_sum / valid_tokens, loss, atol=1e-6)
 
     def test_gradient_flows(self, proj_and_data, device):
         proj, hidden, targets = proj_and_data

@@ -35,7 +35,21 @@ class Muon(torch.optim.Optimizer):
         defaults = dict(lr=lr, momentum=momentum, ns_steps=ns_steps)
         super().__init__(params, defaults)
 
+    @staticmethod
+    def _get_ns_workspace(workspaces, shape, device, dtype):
+        key = (shape, device, dtype)
+        if key not in workspaces:
+            rows, cols = shape
+            workspaces[key] = {
+                'a': torch.empty((rows, rows), device=device, dtype=dtype),
+                'aa': torch.empty((rows, rows), device=device, dtype=dtype),
+                'b': torch.empty((rows, rows), device=device, dtype=dtype),
+                'update': torch.empty((rows, cols), device=device, dtype=dtype),
+            }
+        return workspaces[key]
+
     def step(self):
+        ns_workspaces = {}
         for group in self.param_groups:
             lr = group['lr']
             momentum = group['momentum']
@@ -55,10 +69,17 @@ class Muon(torch.optim.Optimizer):
                 
                 a, b, c = (3.4445, -4.7750, 2.0315)
                 X = buf / (buf.norm(keepdim=True) + 1e-8)  # New tensor, buf stays intact (G4)
+                workspace = self._get_ns_workspace(ns_workspaces, X.shape, X.device, X.dtype)
+                A = workspace['a']
+                AA = workspace['aa']
+                B = workspace['b']
+                update = workspace['update']
                 for _ in range(ns_steps):
-                    A = X @ X.T
-                    B = b * A + c * A @ A
-                    X = a * X + B @ X
+                    torch.matmul(X, X.T, out=A)
+                    torch.matmul(A, A, out=AA)
+                    B.copy_(A).mul_(b).add_(AA, alpha=c)
+                    torch.matmul(B, X, out=update)
+                    X.mul_(a).add_(update)
                     
                 p.data.add_(X.type_as(p.data), alpha=-lr)
 

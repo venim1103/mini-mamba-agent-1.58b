@@ -196,6 +196,18 @@ class TestPackedTokenStream:
         items = [next(gen) for _ in range(10)]
         assert len(items) == 10
 
+    def test_document_exactly_max_seq_len_keeps_single_boundary(self, tok):
+        max_seq_len = 8
+        stream = _make_stream(["a" * (max_seq_len - 1)] * 4)
+        _, _, cu = next(packed_token_stream(stream, tok, "text", max_seq_len=max_seq_len))
+        assert torch.equal(cu, torch.tensor([0, max_seq_len], dtype=torch.int32))
+
+    def test_document_one_token_longer_than_max_seq_len_truncates_cleanly(self, tok):
+        max_seq_len = 8
+        stream = _make_stream(["a" * max_seq_len] * 4)
+        _, _, cu = next(packed_token_stream(stream, tok, "text", max_seq_len=max_seq_len))
+        assert torch.equal(cu, torch.tensor([0, max_seq_len], dtype=torch.int32))
+
 
 # ---------------------------------------------------------------------------
 # packed_collate_fn
@@ -251,6 +263,13 @@ class TestPackedCollateFn:
         _, _, cu, n_segs = packed_collate_fn(batch)
         assert cu.shape == (1, 4)
         assert (cu[0] != -1).all()
+
+    def test_padding_is_minus_one_only_after_real_boundaries(self):
+        batch = [self._make_sample(12, 2), self._make_sample(12, 4)]
+        _, _, cu, n_segs = packed_collate_fn(batch)
+        for row_idx, real_len in enumerate(n_segs.tolist()):
+            assert (cu[row_idx, :real_len] >= 0).all()
+            assert (cu[row_idx, real_len:] == -1).all()
 
 
 # ---------------------------------------------------------------------------

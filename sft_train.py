@@ -22,7 +22,7 @@ from sft_data import SFT_STAGES, create_sft_dataloader
 from transformers import AutoTokenizer
 from dist_utils import (
     setup_distributed, cleanup_distributed, is_main_process,
-    wrap_model_ddp, unwrap_model, barrier,
+    wrap_model_ddp, unwrap_model, barrier, get_world_size,
 )
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # overridden by setup_distributed()
@@ -64,26 +64,38 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
             train_loader.sampler.set_epoch(epoch)
         for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
         accumulated_loss = 0.0
+        accumulated_loss_sum = 0.0
+        accumulated_valid_tokens = 0
         n_batches = len(train_loader)
-        tail_steps = n_batches % GRAD_ACCUM_STEPS
         
         for batch_idx, (x, y) in enumerate(train_loader):
             x, y = x.to(DEVICE), y.to(DEVICE)
 
-            # Avoid under-scaling the final partial accumulation window.
-            if tail_steps > 0 and batch_idx >= n_batches - tail_steps:
-                accum_divisor = tail_steps
-            else:
-                accum_divisor = GRAD_ACCUM_STEPS
-
             with maybe_autocast(DEVICE):
                 hidden = model.forward_hidden(x, seq_idx=None)
-                loss = chunked_cross_entropy(hidden[:, :-1, :], raw_model.output, y[..., 1:], ignore_index=-100) / accum_divisor
-            loss.backward()
-            accumulated_loss += loss.item()
+                loss_sum, valid_tokens = chunked_cross_entropy(
+                    hidden[:, :-1, :],
+                    raw_model.output,
+                    y[..., 1:],
+                    ignore_index=-100,
+                    return_stats=True,
+                )
+            loss_sum.backward()
+            accumulated_loss_sum += loss_sum.detach().item()
+            accumulated_valid_tokens += valid_tokens.detach().item()
             
             should_step = ((batch_idx + 1) % GRAD_ACCUM_STEPS == 0) or (batch_idx + 1 == n_batches)
             if should_step:
+                world_size = get_world_size()
+                global_valid_tokens = accumulated_valid_tokens
+                if world_size > 1:
+                    valid_token_tensor = torch.tensor(accumulated_valid_tokens, device=DEVICE, dtype=torch.float32)
+                    torch.distributed.all_reduce(valid_token_tensor, op=torch.distributed.ReduceOp.SUM)
+                    global_valid_tokens = valid_token_tensor.item()
+                grad_scale = world_size / max(global_valid_tokens, 1.0)
+                for param in model.parameters():
+                    if param.grad is not None:
+                        param.grad.mul_(grad_scale)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 # Fix #14: Call scheduler.step() before get_last_lr() to avoid warning
                 scheduler.step()
@@ -95,6 +107,7 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
                 
                 for opt in [muon_opt, adam_opt, mamba_opt]: opt.step()
                 for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
+                accumulated_loss = accumulated_loss_sum * grad_scale
                 
                 if global_step % 10 == 0 and is_main_process():
                     wandb.log({
@@ -103,6 +116,8 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
                         "SFT/LR": current_lr,
                     }, step=global_step)
                 accumulated_loss = 0.0
+                accumulated_loss_sum = 0.0
+                accumulated_valid_tokens = 0
                 global_step += 1
                 
         if is_main_process():

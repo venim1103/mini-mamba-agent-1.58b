@@ -67,6 +67,7 @@ def main() -> int:
     except FileNotFoundError:
         print(f"Error: Could not find {CKPT_PATH}.")
         return 1
+    model.prepare_for_inference()
     
     print("\n--- Testing Model Logic ---")
     chat_prompt = "<|im_start|>system\nYou are a deductive reasoning agent. You must analyze the user's request step-by-step within <think> tags before acting.<|im_end|>\n<|im_start|>user\nIf I have 3 apples and eat 1, how many are left?<|im_end|>\n<|im_start|>assistant\n<think>\n"
