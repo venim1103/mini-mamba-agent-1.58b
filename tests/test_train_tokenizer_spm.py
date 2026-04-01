@@ -1,0 +1,301 @@
+import contextlib
+import os
+import sys
+from pathlib import Path
+from unittest import mock
+
+import pytest
+import sentencepiece as spm
+
+import train_tokenizer_spm as spm_mod
+
+
+# ---------------------------------------------------------------------------
+# _resolve_profile
+# ---------------------------------------------------------------------------
+
+class TestResolveProfile:
+    def test_explicit_kaggle(self):
+        assert spm_mod._resolve_profile("kaggle") == "kaggle"
+
+    def test_explicit_standard(self):
+        assert spm_mod._resolve_profile("standard") == "standard"
+
+    def test_env_var_triggers_kaggle(self):
+        with mock.patch.dict(os.environ, {"KAGGLE_KERNEL_RUN_TYPE": "batch"}):
+            assert spm_mod._resolve_profile(None) == "kaggle"
+
+    def test_no_env_var_returns_standard(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            assert spm_mod._resolve_profile(None) == "standard"
+
+
+# ---------------------------------------------------------------------------
+# _infer_domain
+# ---------------------------------------------------------------------------
+
+class TestInferDomain:
+    def test_logic_path(self):
+        assert spm_mod._infer_domain("/data/logic/train.jsonl") == "logic"
+
+    def test_code_path(self):
+        assert spm_mod._infer_domain("/data/code/tiny-codes/file.parquet") == "code"
+
+    def test_tools_path(self):
+        assert spm_mod._infer_domain("C:\\data\\tools\\toolformer.jsonl") == "tools"
+
+    def test_web_path(self):
+        assert spm_mod._infer_domain("/datasets/web/fineweb.jsonl") == "web"
+
+    def test_other_fallback(self):
+        assert spm_mod._infer_domain("/datasets/misc/file.jsonl") == "other"
+
+    def test_case_insensitive_matching(self):
+        assert spm_mod._infer_domain("/DATA/LOGIC/train.jsonl") == "logic"
+
+
+# ---------------------------------------------------------------------------
+# parse_args
+# ---------------------------------------------------------------------------
+
+class TestParseArgs:
+    def test_defaults(self):
+        with mock.patch.object(sys, "argv", ["prog"]):
+            args = spm_mod.parse_args()
+        assert args.vocab_size == 64_000
+        assert args.model_type == "bpe"
+        assert args.character_coverage == 0.9995
+        assert args.output_dir == "custom_agentic_tokenizer_spm"
+        assert args.profile is None
+        assert args.input_sentence_size is None
+        assert args.max_sentence_length is None
+
+    def test_explicit_args(self):
+        argv = [
+            "prog",
+            "--profile", "kaggle",
+            "--vocab-size", "32000",
+            "--model-type", "unigram",
+            "--character-coverage", "0.999",
+            "--output-dir", "/tmp/out",
+            "--input-sentence-size", "500000",
+            "--max-sentence-length", "1024",
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            args = spm_mod.parse_args()
+        assert args.profile == "kaggle"
+        assert args.vocab_size == 32_000
+        assert args.model_type == "unigram"
+        assert args.character_coverage == 0.999
+        assert args.output_dir == "/tmp/out"
+        assert args.input_sentence_size == 500_000
+        assert args.max_sentence_length == 1024
+
+
+# ---------------------------------------------------------------------------
+# _build_temp_corpus
+# ---------------------------------------------------------------------------
+
+class TestBuildTempCorpus:
+    @staticmethod
+    def _safe_remove(path):
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(path)
+
+    def _run_corpus(self, file_texts, profile="standard", max_sentence_length=0, profile_override=None):
+        """Run _build_temp_corpus with mocked base iterators."""
+        files = list(file_texts.keys())
+        patches = [
+            mock.patch.object(spm_mod.base, "iter_data_files", return_value=iter(files)),
+            mock.patch.object(spm_mod.base, "iter_file_texts",
+                              side_effect=lambda fp: iter(file_texts.get(fp, []))),
+        ]
+        if profile_override is not None:
+            patches.append(mock.patch.object(spm_mod, "SPM_PROFILE_DEFAULTS", profile_override))
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            return spm_mod._build_temp_corpus(profile, max_sentence_length)
+
+    def _small_profile(self, logic_quota):
+        return {
+            "standard": {
+                "input_sentence_size": 10,
+                "max_sentence_length": 2048,
+                "domain_quota": {"logic": logic_quota, "code": 0, "tools": 0, "web": 0, "other": 0},
+            }
+        }
+
+    def test_writes_sentences_to_corpus(self):
+        path, total = self._run_corpus({"/data/logic/a.jsonl": ["hello world", "foo bar"]})
+        try:
+            assert total == 2
+            assert Path(path).read_text().splitlines() == ["hello world", "foo bar"]
+        finally:
+            self._safe_remove(path)
+
+    def test_skips_empty_lines(self):
+        path, total = self._run_corpus({"/data/logic/a.jsonl": ["  ", "", "  hello  "]})
+        try:
+            assert total == 1
+            assert Path(path).read_text().splitlines() == ["hello"]
+        finally:
+            self._safe_remove(path)
+
+    def test_truncates_text_by_max_sentence_length(self):
+        path, _ = self._run_corpus({"/data/logic/a.jsonl": ["abcdefghij"]}, max_sentence_length=4)
+        try:
+            assert Path(path).read_text().splitlines() == ["abcd"]
+        finally:
+            self._safe_remove(path)
+
+    def test_replaces_newlines_in_text(self):
+        path, _ = self._run_corpus({"/data/logic/a.jsonl": ["line1\nline2"]})
+        try:
+            assert Path(path).read_text().splitlines() == ["line1 line2"]
+        finally:
+            self._safe_remove(path)
+
+    def test_outer_quota_skips_full_domain_file(self):
+        file_texts = {
+            "/data/logic/first.jsonl": ["first sentence"],
+            "/data/logic/second.jsonl": ["should be skipped"],
+        }
+        path, total = self._run_corpus(file_texts, profile_override=self._small_profile(1))
+        try:
+            assert total == 1
+            assert "should be skipped" not in Path(path).read_text().splitlines()
+        finally:
+            self._safe_remove(path)
+
+    def test_inner_quota_breaks_mid_file(self):
+        path, total = self._run_corpus(
+            {"/data/logic/a.jsonl": ["one", "two", "three"]},
+            profile_override=self._small_profile(2),
+        )
+        try:
+            assert Path(path).read_text().splitlines() == ["one", "two"]
+            assert total == 2
+        finally:
+            self._safe_remove(path)
+
+    def test_returns_zero_total_on_empty_data(self):
+        path, total = self._run_corpus({})
+        try:
+            assert total == 0
+        finally:
+            self._safe_remove(path)
+
+
+# ---------------------------------------------------------------------------
+# _export_hf_tokenizer
+# ---------------------------------------------------------------------------
+
+class TestExportHfTokenizer:
+    def test_saves_pretrained_with_correct_config(self, tmp_path):
+        mock_tokenizer = mock.MagicMock()
+        mock_cls = mock.MagicMock(return_value=mock_tokenizer)
+        mock_transformers = mock.MagicMock()
+        mock_transformers.LlamaTokenizerFast = mock_cls
+
+        spm_model_path = str(tmp_path / "spm.model")
+        out_dir = str(tmp_path / "out")
+
+        with mock.patch.dict(sys.modules, {"transformers": mock_transformers}):
+            spm_mod._export_hf_tokenizer(spm_model_path, out_dir)
+
+        mock_cls.assert_called_once()
+        call_kwargs = mock_cls.call_args[1]
+        assert call_kwargs["vocab_file"] == spm_model_path
+        assert call_kwargs["eos_token"] == "<|eos|>"
+        mock_tokenizer.save_pretrained.assert_called_once_with(out_dir)
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+class TestMain:
+    def _mock_args(self, **overrides):
+        args = mock.MagicMock()
+        args.profile = None
+        args.vocab_size = 64_000
+        args.model_type = "bpe"
+        args.character_coverage = 0.9995
+        args.output_dir = "custom_agentic_tokenizer_spm"
+        args.input_sentence_size = None
+        args.max_sentence_length = None
+        for k, v in overrides.items():
+            setattr(args, k, v)
+        return args
+
+    def test_main_normal_flow(self, tmp_path):
+        args = self._mock_args(output_dir=str(tmp_path))
+        corpus_path = str(tmp_path / "corpus.txt")
+
+        with mock.patch.object(spm_mod, "parse_args", return_value=args), \
+             mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 100)) as mock_corpus, \
+             mock.patch.object(spm.SentencePieceTrainer, "train") as mock_train, \
+             mock.patch.object(spm_mod, "_export_hf_tokenizer") as mock_export, \
+             mock.patch.object(spm_mod.os, "remove") as mock_remove:
+            spm_mod.main()
+
+        mock_corpus.assert_called_once()
+        mock_train.assert_called_once()
+        mock_export.assert_called_once()
+        mock_remove.assert_called_once_with(corpus_path)
+
+    def test_main_uses_explicit_sentence_size_and_length(self, tmp_path):
+        args = self._mock_args(output_dir=str(tmp_path), input_sentence_size=500_000, max_sentence_length=1024)
+        corpus_path = str(tmp_path / "corpus.txt")
+
+        with mock.patch.object(spm_mod, "parse_args", return_value=args), \
+             mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 50)) as mock_corpus, \
+             mock.patch.object(spm.SentencePieceTrainer, "train") as mock_train, \
+             mock.patch.object(spm_mod, "_export_hf_tokenizer"), \
+             mock.patch.object(spm_mod.os, "remove"):
+            spm_mod.main()
+
+        assert mock_corpus.call_args.kwargs["profile"] == "standard"
+        assert mock_corpus.call_args.kwargs["max_sentence_length"] == 1024
+        assert mock_train.call_args.kwargs["input_sentence_size"] == 500_000
+        assert mock_train.call_args.kwargs["max_sentence_length"] == 1024
+
+    def test_main_uses_kaggle_profile_defaults(self, tmp_path):
+        args = self._mock_args(output_dir=str(tmp_path), profile="kaggle")
+        corpus_path = str(tmp_path / "corpus.txt")
+
+        with mock.patch.object(spm_mod, "parse_args", return_value=args), \
+             mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 50)) as mock_corpus, \
+             mock.patch.object(spm.SentencePieceTrainer, "train") as mock_train, \
+             mock.patch.object(spm_mod, "_export_hf_tokenizer"), \
+             mock.patch.object(spm_mod.os, "remove"):
+            spm_mod.main()
+
+        assert mock_corpus.call_args.kwargs["profile"] == "kaggle"
+        assert mock_corpus.call_args.kwargs["max_sentence_length"] == 1600
+        assert mock_train.call_args.kwargs["input_sentence_size"] == 1_000_000
+        assert mock_train.call_args.kwargs["max_sentence_length"] == 1600
+
+    def test_main_raises_on_empty_corpus(self, tmp_path):
+        args = self._mock_args(output_dir=str(tmp_path))
+        corpus_path = str(tmp_path / "corpus.txt")
+
+        with mock.patch.object(spm_mod, "parse_args", return_value=args), \
+             mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 0)), \
+             mock.patch.object(spm_mod.os, "remove"):
+            with pytest.raises(RuntimeError, match="No training text found"):
+                spm_mod.main()
+
+    def test_main_removes_corpus_even_on_error(self, tmp_path):
+        args = self._mock_args(output_dir=str(tmp_path))
+        corpus_path = str(tmp_path / "corpus.txt")
+
+        with mock.patch.object(spm_mod, "parse_args", return_value=args), \
+             mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 10)), \
+             mock.patch.object(spm.SentencePieceTrainer, "train", side_effect=RuntimeError("spm fail")), \
+             mock.patch.object(spm_mod.os, "remove") as mock_remove:
+            with pytest.raises(RuntimeError, match="spm fail"):
+                spm_mod.main()
+
+        mock_remove.assert_called_once_with(corpus_path)
