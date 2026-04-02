@@ -16,6 +16,7 @@ import collections
 import json
 import os
 import re
+import sys
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -96,6 +97,28 @@ def _corpus_bytes_for_ram(ram_gb):
 
 MAX_RAM_GB = float(os.getenv("TOKENIZER_MAX_RAM_GB", _profile_default("max_ram_gb")))
 MAX_CORPUS_BYTES = _corpus_bytes_for_ram(MAX_RAM_GB)
+
+
+def _resolve_backend(profile, max_ram_gb):
+    """Choose tokenizer backend.
+
+    - TOKENIZER_BACKEND=hf|spm forces a backend.
+    - TOKENIZER_BACKEND=auto (or unset) auto-selects SentencePiece on lower-RAM
+      setups where HF Rust BPE commonly OOMs.
+    """
+    explicit = os.getenv("TOKENIZER_BACKEND", "auto").strip().lower()
+    if explicit in {"hf", "spm"}:
+        return explicit
+
+    if explicit not in {"", "auto"}:
+        print(f"Unknown TOKENIZER_BACKEND={explicit!r}; falling back to auto.")
+
+    if profile == "kaggle" or max_ram_gb < 64:
+        return "spm"
+    return "hf"
+
+
+BACKEND = _resolve_backend(PROFILE, MAX_RAM_GB)
 
 # These must be preserved as single tokens so the model can reason and format perfectly!
 SPECIAL_TOKENS = [
@@ -432,7 +455,38 @@ def _filtered_batch_iterator(tokenizer, allowed_words):
     print(f"Pass 2 done ({total_bytes / 1_073_741_824:.2f} GB).")
 
 
-def main():
+def _run_sentencepiece_backend():
+    script_path = os.path.join(os.path.dirname(__file__), "train_tokenizer_spm.py")
+    command = [
+        sys.executable,
+        script_path,
+        "--profile",
+        PROFILE,
+        "--vocab-size",
+        str(VOCAB_SIZE),
+        "--output-dir",
+        OUTPUT_DIR,
+        "--model-type",
+        os.getenv("TOKENIZER_SPM_MODEL_TYPE", "bpe"),
+    ]
+
+    input_sentence_size = os.getenv("TOKENIZER_SPM_INPUT_SENTENCE_SIZE")
+    if input_sentence_size:
+        command.extend(["--input-sentence-size", input_sentence_size])
+
+    max_sentence_length = os.getenv("TOKENIZER_SPM_MAX_SENTENCE_LENGTH")
+    if max_sentence_length:
+        command.extend(["--max-sentence-length", max_sentence_length])
+
+    print(
+        "Tokenizer backend: SentencePiece "
+        f"(selected via TOKENIZER_BACKEND={os.getenv('TOKENIZER_BACKEND', 'auto')})."
+    )
+    print("Delegating to train_tokenizer_spm.py for low-RAM-safe training...")
+    os.execv(sys.executable, command)
+
+
+def _train_hf_backend():
     print(f"Loading template tokenizer ({TEMPLATE_TOKENIZER})...")
     old_tokenizer = AutoTokenizer.from_pretrained(TEMPLATE_TOKENIZER)
 
@@ -448,6 +502,7 @@ def main():
     print(
         f"\nTraining new vocabulary of size {VOCAB_SIZE}.\n"
         f"Profile: {PROFILE} | "
+        f"Backend: hf | "
         f"RAM budget: {MAX_RAM_GB:.0f} GB | "
         f"max unique words: {MAX_UNIQUE_WORDS:,} | "
         f"min_frequency: {MIN_FREQUENCY}"
@@ -470,6 +525,18 @@ def main():
     new_tokenizer.save_pretrained(OUTPUT_DIR)
     
     print("Done! Your model's vocabulary is now perfectly mathematically tuned to your data.")
+
+
+def main():
+    if BACKEND == "spm":
+        _run_sentencepiece_backend()
+        return
+
+    print(
+        "Tokenizer backend: HuggingFace BPE "
+        f"(selected via TOKENIZER_BACKEND={os.getenv('TOKENIZER_BACKEND', 'auto')})."
+    )
+    _train_hf_backend()
 
 if __name__ == "__main__":
     main()

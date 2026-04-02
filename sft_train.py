@@ -54,7 +54,12 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
         reasoning_off_prob=stage_cfg["reasoning_off_prob"],
     )
 
-    muon_opt, adam_opt, mamba_opt = setup_mamba_optimizers(raw_model, {"peak_lr": lr, "end_lr": lr * 0.1})
+    use_8bit = DEVICE.startswith("cuda")
+    muon_opt, adam_opt, mamba_opt = setup_mamba_optimizers(
+        raw_model,
+        {"peak_lr": lr, "end_lr": lr * 0.1},
+        use_8bit=use_8bit,
+    )
     total_optim_steps = len(train_loader) * epochs // GRAD_ACCUM_STEPS
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(adam_opt, T_max=max(total_optim_steps, 1), eta_min=lr * 0.1)
 

@@ -436,7 +436,7 @@ class BitMambaBlock(nn.Module):
         )
 
         # Causal conv1d on x, B, C (not z — z is the gate)
-        if causal_conv1d_fn is not None:
+        if causal_conv1d_fn is not None and xBC.is_cuda:
             xBC = causal_conv1d_fn(
                 xBC.transpose(1, 2),  # (B, conv_dim, L)
                 rearrange(self.conv1d.weight, "d 1 w -> d w"),
@@ -499,7 +499,7 @@ class BitMambaBlock(nn.Module):
             conv_state = F.pad(xBC_t, (self.d_conv - seqlen, 0)).clone()
 
         # Apply conv1d
-        if causal_conv1d_fn is not None:
+        if causal_conv1d_fn is not None and xBC_t.is_cuda:
             xBC = causal_conv1d_fn(
                 xBC_t,
                 rearrange(self.conv1d.weight, "d 1 w -> d w"),
@@ -560,7 +560,7 @@ class BitMambaBlock(nn.Module):
 
         conv_state = cache["conv_state"]
 
-        if causal_conv1d_update is not None:
+        if causal_conv1d_update is not None and xBC.is_cuda:
             xBC = causal_conv1d_update(
                 xBC,
                 conv_state,
@@ -584,7 +584,7 @@ class BitMambaBlock(nn.Module):
         A = -torch.exp(self.A_log.float())
         ssm_state = cache["ssm_state"]  # (bsz, nheads, headdim, d_state)
 
-        if selective_state_update is not None:
+        if selective_state_update is not None and ssm_state.is_cuda:
             x = rearrange(x, "b (h p) -> b h p", p=self.headdim)
             z = rearrange(z, "b (h p) -> b h p", p=self.headdim)
             B = rearrange(B, "b (g n) -> b g n", g=self.ngroups)

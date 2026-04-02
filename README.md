@@ -184,6 +184,13 @@ Generate the 64k mathematical vocabulary strictly from your local `train/` data:
 python train_tokenizer.py
 ```
 
+`train_tokenizer.py` now auto-selects the backend:
+
+- `spm` (SentencePiece) on Kaggle or when RAM budget is below 64 GB
+- `hf` (HuggingFace Rust BPE) on larger-memory machines
+
+This avoids the common Rust BPE OOM in `Tokenize words` / `Compute merges` on constrained systems.
+
 The tokenizer trainer uses a **two-pass approach** to keep memory bounded on any machine:
 
 1. **Pass 1 — Word census:** Streams all local `.jsonl`, `.json`, and `.parquet` files through the template tokenizer's pre-tokenizer, counting word frequencies in a Python `Counter`. Memory usage: O(unique words), typically 200–500 MB.
@@ -203,6 +210,12 @@ TOKENIZER_PROFILE=kaggle python train_tokenizer.py
 
 # strict low-memory run
 TOKENIZER_PROFILE=kaggle TOKENIZER_MAX_UNIQUE_WORDS=100000 python train_tokenizer.py
+
+# force HuggingFace BPE backend (only recommended on high-RAM machines)
+TOKENIZER_BACKEND=hf python train_tokenizer.py
+
+# force SentencePiece backend
+TOKENIZER_BACKEND=spm python train_tokenizer.py
 ```
 
 | Profile | Suggested MAX_UNIQUE_WORDS | Approx peak RAM |
@@ -213,6 +226,7 @@ TOKENIZER_PROFILE=kaggle TOKENIZER_MAX_UNIQUE_WORDS=100000 python train_tokenize
 Optional controls:
 
 - `TOKENIZER_PROFILE`: `standard` or `kaggle` (default: auto-detect)
+- `TOKENIZER_BACKEND`: `auto`, `spm`, or `hf` (default: `auto`)
 - `TOKENIZER_MAX_RAM_GB`: your available RAM in GB; sets a generous corpus byte cap (default: `30` standard, `13` kaggle)
 - `TOKENIZER_MAX_UNIQUE_WORDS`: max unique pre-tokenized words the BPE trainer will see (default: `200000` standard, `200000` kaggle)
 - `TOKENIZER_MIN_FREQUENCY`: minimum word frequency to be included in training (default: `3`)
@@ -220,6 +234,9 @@ Optional controls:
 - `TOKENIZER_MAX_BATCH_EXAMPLES`: max documents buffered before flushing to the trainer (default: `128` standard, `96` kaggle)
 - `TOKENIZER_MAX_BATCH_CHARACTERS`: max total characters buffered before flushing (default: `2000000` standard, `1200000` kaggle)
 - `TOKENIZER_PARQUET_BATCH_SIZE`: rows read at a time from parquet files (default: `256` standard, `192` kaggle)
+- `TOKENIZER_SPM_MODEL_TYPE`: SentencePiece model type used by backend `spm` (`bpe` or `unigram`, default: `bpe`)
+- `TOKENIZER_SPM_INPUT_SENTENCE_SIZE`: optional override passed to SentencePiece backend
+- `TOKENIZER_SPM_MAX_SENTENCE_LENGTH`: optional override passed to SentencePiece backend
 
 ### 2b. Recommended Low-RAM Tokenizer (SentencePiece)
 

@@ -336,6 +336,28 @@ class TestProfileResolution:
         assert tt.PROFILE_DEFAULTS["kaggle"]["max_unique_words"] == "200000"
 
 
+class TestBackendResolution:
+    def test_explicit_hf_backend_wins(self):
+        with mock.patch.dict(os.environ, {"TOKENIZER_BACKEND": "hf"}, clear=True):
+            assert tt._resolve_backend(profile="kaggle", max_ram_gb=13) == "hf"
+
+    def test_explicit_spm_backend_wins(self):
+        with mock.patch.dict(os.environ, {"TOKENIZER_BACKEND": "spm"}, clear=True):
+            assert tt._resolve_backend(profile="standard", max_ram_gb=128) == "spm"
+
+    def test_auto_selects_spm_on_kaggle(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            assert tt._resolve_backend(profile="kaggle", max_ram_gb=13) == "spm"
+
+    def test_auto_selects_spm_under_64gb(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            assert tt._resolve_backend(profile="standard", max_ram_gb=30) == "spm"
+
+    def test_auto_selects_hf_on_large_ram_standard(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            assert tt._resolve_backend(profile="standard", max_ram_gb=64) == "hf"
+
+
 # ---------------------------------------------------------------------------
 # _prune_counter
 # ---------------------------------------------------------------------------
