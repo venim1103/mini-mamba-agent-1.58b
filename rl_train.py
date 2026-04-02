@@ -15,6 +15,11 @@
 import torch
 import torch.nn.functional as F
 import os
+import wandb
+from datasets import load_dataset
+from transformers import AutoTokenizer
+from model import BitMambaLLM, maybe_autocast
+from optim import setup_mamba_optimizers
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SFT_CKPT = "checkpoints/sft/sft_final.pt"
@@ -149,13 +154,124 @@ def filter_problems_on_policy(model, tokenizer, problems, eos_id):
     return filtered
 
 
-def main():
-    import wandb
-    from datasets import load_dataset
-    from transformers import AutoTokenizer
-    from model import BitMambaLLM, maybe_autocast
-    from optim import setup_mamba_optimizers
+def run_rl_steps(model, tokenizer, dataset, optimizers, eos_id,
+                 total_steps, checkpoint_dir, device):
+    """Inner GRPO training loop, decoupled from model loading and wandb init."""
+    muon_opt, adam_opt, mamba_opt = optimizers
+    data_iter = iter(dataset)
+    step = 0
 
+    while step < total_steps:
+        raw_batch = []
+        for _ in range(FILTER_BATCH):
+            try: raw_batch.append(next(data_iter))
+            except StopIteration:
+                data_iter = iter(dataset)
+                raw_batch.append(next(data_iter))
+        
+        filtered = filter_problems_on_policy(model, tokenizer, raw_batch, eos_id)
+        if not filtered:
+            print(f"  Step {step}: filter returned 0 problems, retrying...")
+            continue
+        
+        filtered.sort(key=lambda s: -s['_pass_rate'])
+        print(f"  Step {step}: filtered {len(filtered)}/{FILTER_BATCH} problems (pass_rate range: "
+              f"{filtered[-1]['_pass_rate']:.0%}–{filtered[0]['_pass_rate']:.0%})")
+        
+        for sample in filtered:
+            if step >= total_steps:
+                break
+                
+            question = sample.get('problem', sample.get('question', ''))
+            ground_truth = str(sample.get('expected_answer', sample.get('answer', sample.get('solution', ''))))
+            
+            sys_prompt = "You are a deductive reasoning agent. You must analyze the user's request step-by-step within <think> tags before acting."
+            prompt = f"<|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+            input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+            
+            if device.startswith("cuda"):
+                for opt in [muon_opt, adam_opt, mamba_opt]:
+                    for state in opt.state.values():
+                        for k, v in state.items():
+                            if isinstance(v, torch.Tensor): state[k] = v.cpu()
+                torch.cuda.empty_cache()
+            
+            model.eval()
+            completions_ids, completions_text, old_log_probs_list = [], [], []
+            with torch.no_grad():
+                for _ in range(GROUP_SIZE):
+                    generated = model.generate(input_ids, max_new_tokens=MAX_GEN_TOKENS, temperature=0.8,
+                                               do_sample=True, eos_token_id=eos_id)
+                    gen_only = generated[0][input_ids.shape[1]:]
+                    completions_ids.append(gen_only.cpu())
+                    completions_text.append(tokenizer.decode(gen_only, skip_special_tokens=True))
+                    
+                    full_seq = torch.cat([input_ids[0], gen_only]).unsqueeze(0)
+                    with maybe_autocast(device):
+                        hidden = model.forward_hidden(full_seq, seq_idx=None)
+                        hidden_slice = hidden[0:1, input_ids.shape[1]-1:-1, :]
+                        logits = model.output(hidden_slice)
+                        log_probs = -F.cross_entropy(
+                            logits[0, :, :].contiguous(),
+                            gen_only.contiguous(), reduction='none'
+                        )
+                    old_log_probs_list.append(log_probs.detach())
+                    
+            rewards = compute_rewards(completions_text, ground_truth)
+            advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+            
+            if device.startswith("cuda"):
+                for opt in [muon_opt, adam_opt, mamba_opt]:
+                    for state in opt.state.values():
+                        for k, v in state.items():
+                            if isinstance(v, torch.Tensor): state[k] = v.to(device)
+            
+            model.train()
+            for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
+            policy_loss = 0.0
+            EPS = 0.2
+            
+            for i in range(GROUP_SIZE):
+                comp_ids = completions_ids[i].to(device)
+                old_log_probs = old_log_probs_list[i].to(device)
+                
+                full_seq = torch.cat([input_ids[0], comp_ids]).unsqueeze(0)
+                with maybe_autocast(device):
+                    hidden = model.forward_hidden(full_seq, seq_idx=None)
+                    hidden_slice = hidden[0:1, input_ids.shape[1]-1:-1, :]
+                    logits = model.output(hidden_slice)
+                    log_probs = -F.cross_entropy(
+                        logits[0, :, :].contiguous(),
+                        comp_ids.contiguous(), reduction='none'
+                    )
+                    
+                    ratio = torch.exp(log_probs - old_log_probs)
+                    surr1 = ratio * advantages[i]
+                    surr2 = torch.clamp(ratio, 1.0 - EPS, 1.0 + EPS) * advantages[i]
+                    loss = -torch.min(surr1, surr2).mean() / GROUP_SIZE
+                loss.backward()
+                policy_loss += loss.item()
+                
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            for opt in [muon_opt, adam_opt, mamba_opt]: opt.step()
+            
+            if step % 10 == 0:
+                wandb.log({
+                    "RL/Mean_Reward": rewards.mean().item(),
+                    "RL/Policy_Loss": policy_loss,
+                    "RL/Format_Reward": sum(compute_format_reward(c) for c in completions_text) / len(completions_text),
+                    "RL/Pass_Rate": sample['_pass_rate'],
+                }, step=step)
+            if step > 0 and step % 1000 == 0:
+                torch.save({'step': step, 'model_state_dict': model.state_dict()},
+                           os.path.join(checkpoint_dir, f"rl_step_{step:06d}.pt"))
+            step += 1
+    
+    torch.save({'step': step, 'model_state_dict': model.state_dict()},
+               os.path.join(checkpoint_dir, "rl_final.pt"))
+
+
+def main():
     global DEVICE
 
     # RL is single-GPU only (GRPO generation is inherently sequential).
@@ -187,128 +303,17 @@ def main():
     model.load_state_dict(torch.load(SFT_CKPT, map_location=DEVICE)['model_state_dict'])
     muon_opt, adam_opt, mamba_opt = setup_mamba_optimizers(model, {"peak_lr": PEAK_LR, "end_lr": 1e-6})
 
-    # ---------------------------------------------------------------------------
-    # On-policy filtering + curriculum (easy → hard ordering)
-    # ---------------------------------------------------------------------------
-    step = 0
-    while step < TOTAL_STEPS:
-        # Collect a batch of candidate problems
-        raw_batch = []
-        for _ in range(FILTER_BATCH):
-            try: raw_batch.append(next(data_iter))
-            except StopIteration:
-                data_iter = iter(dataset)
-                raw_batch.append(next(data_iter))
-        
-        # Filter to appropriate difficulty
-        filtered = filter_problems_on_policy(model, tokenizer, raw_batch, eos_id)
-        if not filtered:
-            print(f"  Step {step}: filter returned 0 problems, retrying...")
-            continue
-        
-        # Curriculum: sort easy → hard (highest pass_rate first)
-        filtered.sort(key=lambda s: -s['_pass_rate'])
-        print(f"  Step {step}: filtered {len(filtered)}/{FILTER_BATCH} problems (pass_rate range: "
-              f"{filtered[-1]['_pass_rate']:.0%}–{filtered[0]['_pass_rate']:.0%})")
-        
-        # Train on each filtered problem
-        for sample in filtered:
-            if step >= TOTAL_STEPS:
-                break
-                
-            question = sample.get('problem', sample.get('question', ''))
-            ground_truth = str(sample.get('expected_answer', sample.get('answer', sample.get('solution', ''))))
-            
-            sys_prompt = "You are a deductive reasoning agent. You must analyze the user's request step-by-step within <think> tags before acting."
-            prompt = f"<|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n<think>\n"
-            input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(DEVICE)
-            
-            # G6: Offload optimizer states to CPU during generation (~1.65GB savings)
-            if DEVICE.startswith("cuda"):
-                for opt in [muon_opt, adam_opt, mamba_opt]:
-                    for state in opt.state.values():
-                        for k, v in state.items():
-                            if isinstance(v, torch.Tensor): state[k] = v.cpu()
-                torch.cuda.empty_cache()  # Force release of freed GPU blocks
-            
-            # Generate GROUP_SIZE completions
-            model.eval()
-            completions_ids, completions_text, old_log_probs_list = [], [], []
-            with torch.no_grad():
-                for _ in range(GROUP_SIZE):
-                    generated = model.generate(input_ids, max_new_tokens=MAX_GEN_TOKENS, temperature=0.8,
-                                               do_sample=True, eos_token_id=eos_id)
-                    gen_only = generated[0][input_ids.shape[1]:]
-                    completions_ids.append(gen_only.cpu())  # offload to CPU during generation
-                    completions_text.append(tokenizer.decode(gen_only, skip_special_tokens=True))
-                    
-                    # Capture old_log_probs for PPO epsilon clipping
-                    full_seq = torch.cat([input_ids[0], gen_only]).unsqueeze(0)
-                    with maybe_autocast(DEVICE):
-                        hidden = model.forward_hidden(full_seq, seq_idx=None)
-                        hidden_slice = hidden[0:1, input_ids.shape[1]-1:-1, :]
-                        logits = model.output(hidden_slice)
-                        log_probs = -F.cross_entropy(
-                            logits[0, :, :].contiguous(),
-                            gen_only.contiguous(), reduction='none'
-                        )
-                    old_log_probs_list.append(log_probs.detach())
-                    
-            rewards = compute_rewards(completions_text, ground_truth)
-            advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
-            
-            # G6: Restore optimizer states from CPU back to GPU
-            if DEVICE.startswith("cuda"):
-                for opt in [muon_opt, adam_opt, mamba_opt]:
-                    for state in opt.state.values():
-                        for k, v in state.items():
-                            if isinstance(v, torch.Tensor): state[k] = v.to(DEVICE)
-            
-            # GRPO policy gradient step with PPO epsilon clipping
-            model.train()
-            for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
-            policy_loss = 0.0
-            EPS = 0.2  # PPO epsilon clipping coefficient
-            
-            for i in range(GROUP_SIZE):
-                comp_ids = completions_ids[i].to(DEVICE)
-                old_log_probs = old_log_probs_list[i].to(DEVICE)
-                
-                full_seq = torch.cat([input_ids[0], comp_ids]).unsqueeze(0)
-                with maybe_autocast(DEVICE):
-                    hidden = model.forward_hidden(full_seq, seq_idx=None)
-                    hidden_slice = hidden[0:1, input_ids.shape[1]-1:-1, :]
-                    logits = model.output(hidden_slice)
-                    log_probs = -F.cross_entropy(
-                        logits[0, :, :].contiguous(),
-                        comp_ids.contiguous(), reduction='none'
-                    )
-                    
-                    # PPO epsilon clipping (DAPO-style without KL)
-                    ratio = torch.exp(log_probs - old_log_probs)
-                    surr1 = ratio * advantages[i]
-                    surr2 = torch.clamp(ratio, 1.0 - EPS, 1.0 + EPS) * advantages[i]
-                    loss = -torch.min(surr1, surr2).mean() / GROUP_SIZE
-                loss.backward()
-                policy_loss += loss.item()
-                
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            for opt in [muon_opt, adam_opt, mamba_opt]: opt.step()
-            
-            if step % 10 == 0:
-                wandb.log({
-                    "RL/Mean_Reward": rewards.mean().item(),
-                    "RL/Policy_Loss": policy_loss,
-                    "RL/Format_Reward": sum(compute_format_reward(c) for c in completions_text) / len(completions_text),
-                    "RL/Pass_Rate": sample['_pass_rate'],
-                }, step=step)
-            if step > 0 and step % 1000 == 0:
-                torch.save({'step': step, 'model_state_dict': model.state_dict()},
-                           os.path.join(CHECKPOINT_DIR, f"rl_step_{step:06d}.pt"))
-            step += 1
-    
-    torch.save({'step': step, 'model_state_dict': model.state_dict()},
-               os.path.join(CHECKPOINT_DIR, "rl_final.pt"))
+    run_rl_steps(
+        model=model,
+        tokenizer=tokenizer,
+        dataset=dataset,
+        optimizers=(muon_opt, adam_opt, mamba_opt),
+        eos_id=eos_id,
+        total_steps=TOTAL_STEPS,
+        checkpoint_dir=CHECKPOINT_DIR,
+        device=DEVICE,
+    )
+
     wandb.finish()
 
 
