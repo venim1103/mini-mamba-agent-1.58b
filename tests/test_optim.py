@@ -63,12 +63,48 @@ class TestMuon:
         optim.step()
         assert optim.state[p]["momentum_buffer"].shape == p.shape
 
-    def test_step_workspace_is_not_persisted_in_optimizer_state(self):
+    def test_per_param_state_only_contains_momentum_buffer(self):
         p = _tiny_linear_param((8, 4))
         optim = Muon([p], lr=0.01)
         p.grad = torch.ones_like(p)
         optim.step()
         assert set(optim.state[p].keys()) == {"momentum_buffer"}
+
+    def test_workspace_persisted_across_steps(self):
+        """ns_workspaces should survive across step() calls — the fix for the VRAM leak."""
+        p = _tiny_linear_param((8, 4))
+        optim = Muon([p], lr=0.01)
+
+        p.grad = torch.ones_like(p)
+        optim.step()
+        assert len(optim.ns_workspaces) > 0, "Workspace should be populated after first step"
+
+        keys_after_step1 = set(optim.ns_workspaces.keys())
+        data_ptrs = {
+            key: {buf: optim.ns_workspaces[key][buf].data_ptr()
+                  for buf in ['a', 'aa', 'b', 'update']}
+            for key in optim.ns_workspaces
+        }
+
+        p.grad = torch.ones_like(p)
+        optim.step()
+
+        assert set(optim.ns_workspaces.keys()) == keys_after_step1
+        for key in keys_after_step1:
+            for buf_name in ['a', 'aa', 'b', 'update']:
+                assert optim.ns_workspaces[key][buf_name].data_ptr() == data_ptrs[key][buf_name], \
+                    f"Buffer '{buf_name}' was reallocated between steps — caching is broken"
+
+    def test_workspace_shape_drift_guard(self):
+        """Shape-drift guard should clear ns_workspaces when it exceeds 16 entries."""
+        p = _tiny_linear_param((8, 4))
+        optim = Muon([p], lr=0.01)
+        for i in range(17):
+            optim.ns_workspaces[((i, i), 'cpu', torch.float32)] = {}
+        assert len(optim.ns_workspaces) == 17
+        p.grad = torch.ones_like(p)
+        optim.step()
+        assert len(optim.ns_workspaces) <= 16
 
     def test_lr_zero_gives_no_update(self):
         p = _tiny_linear_param()
