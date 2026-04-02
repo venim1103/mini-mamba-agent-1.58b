@@ -32,6 +32,12 @@ MODEL_CONFIG = dict(vocab_size=64000, dim=1024, n_layers=40, d_state=128, expand
 
 BATCH_SIZE = 2
 GRAD_ACCUM_STEPS = 8
+# Use FP16 on Ampere (RTX 3090). Change to torch.bfloat16 on Ada Lovelace (RTX 4090).
+AMP_DTYPE = torch.float16
+# Fixed constant to keep loss_sum in a safe range for the FP16 GradScaler.
+# Uses the maximum possible SFT context (16384) so it is safe across all stages.
+# Must match the constant used in the grad_scale calculation below.
+SAFE_DIVISOR = BATCH_SIZE * 16384.0
 
 
 def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
@@ -57,6 +63,7 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
         print(f"SFT Stage {stage_num}: {name} | epochs={epochs} lr={lr} samples={len(train_loader.dataset)}")
         print(f"{'='*60}")
 
+    scaler = torch.amp.GradScaler(enabled=(DEVICE.startswith("cuda") and AMP_DTYPE == torch.float16))
     model.train()
     for epoch in range(epochs):
         # DistributedSampler must be told the epoch so it shuffles differently each time
@@ -71,7 +78,7 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
         for batch_idx, (x, y) in enumerate(train_loader):
             x, y = x.to(DEVICE), y.to(DEVICE)
 
-            with maybe_autocast(DEVICE):
+            with maybe_autocast(DEVICE, amp_dtype=AMP_DTYPE):
                 hidden = model.forward_hidden(x, seq_idx=None)
                 loss_sum, valid_tokens = chunked_cross_entropy(
                     hidden[:, :-1, :],
@@ -80,7 +87,9 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
                     ignore_index=-100,
                     return_stats=True,
                 )
-            loss_sum.backward()
+            safe_loss = loss_sum / SAFE_DIVISOR
+            scaler.scale(safe_loss).backward()
+            # Accumulate the true (un-divided) loss sum for correct metric logging.
             accumulated_loss_sum += loss_sum.detach().item()
             accumulated_valid_tokens += valid_tokens.detach().item()
             
@@ -92,7 +101,11 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
                     valid_token_tensor = torch.tensor(accumulated_valid_tokens, device=DEVICE, dtype=torch.float32)
                     torch.distributed.all_reduce(valid_token_tensor, op=torch.distributed.ReduceOp.SUM)
                     global_valid_tokens = valid_token_tensor.item()
-                grad_scale = world_size / max(global_valid_tokens, 1.0)
+                # Unscale first so custom grad_scale and clip_grad_norm operate
+                # on true gradient magnitudes, not GradScaler-inflated ones.
+                for opt in [muon_opt, adam_opt, mamba_opt]: scaler.unscale_(opt)
+                # Multiply SAFE_DIVISOR back in to restore exact accumulation math.
+                grad_scale = (world_size * SAFE_DIVISOR) / max(global_valid_tokens, 1.0)
                 for param in model.parameters():
                     if param.grad is not None:
                         param.grad.mul_(grad_scale)
@@ -104,8 +117,9 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
                 for opt in [muon_opt, adam_opt]:
                     for group in opt.param_groups: group['lr'] = current_lr
                 for group in mamba_opt.param_groups: group['lr'] = current_lr * 0.1
-                
-                for opt in [muon_opt, adam_opt, mamba_opt]: opt.step()
+
+                for opt in [muon_opt, adam_opt, mamba_opt]: scaler.step(opt)
+                scaler.update()
                 for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
                 accumulated_loss = accumulated_loss_sum * grad_scale
                 

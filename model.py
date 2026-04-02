@@ -284,7 +284,7 @@ class AttentionBlock(nn.Module):
             # Enforce document boundaries from seq_idx by attending only within
             # each contiguous segment. This prevents cross-document leakage.
             batch_size, _, seqlen, _ = q.shape
-            out = torch.empty_like(hidden_states.new_empty(batch_size, seqlen, self.n_heads, self.head_dim))
+            out = hidden_states.new_empty(batch_size, seqlen, self.n_heads, self.head_dim)
             for b in range(batch_size):
                 seg = seq_idx[b]
                 changes = torch.nonzero(seg[1:] != seg[:-1], as_tuple=False).flatten() + 1

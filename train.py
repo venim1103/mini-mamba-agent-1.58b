@@ -52,6 +52,10 @@ SAVE_EVERY = 5000
 # Set to torch.bfloat16 on Ada Lovelace (RTX 4090) where BF16 == FP16 speed.
 AMP_DTYPE = torch.float16
 CHECKPOINT_DIR = f"checkpoints/bitmamba_{MODE}"
+# Static divisor to keep loss_sum in a safe range for the FP16 GradScaler.
+# Must be a fixed constant — do not use current_ctx here, as it changes between
+# FG-WSD phases and would cause logged loss values to jump discontinuously.
+SAFE_DIVISOR = 16384.0 * BATCH_SIZE
 
 # FG-WSD: Data quality progression per phase (Nanbeige4-3B §2.2.2)
 # Keep LR flat while progressively increasing data quality
@@ -161,7 +165,9 @@ def main():
             print(f"Warning: Upscaled checkpoint not found at {upscale_ckpt}")
             print("Please run: python upscale.py first")
     
-    # G12: torch.compile the shared backbone so both forward() and forward_hidden() benefit
+    # IMPORTANT: torch.compile is compatible with gradient checkpointing ONLY when
+    # use_reentrant=False (set in BitMambaLLM._backbone). Do NOT change checkpointing
+    # to use_reentrant=True — it will silently corrupt gradients under compile.
     model._backbone = torch.compile(model._backbone, mode="reduce-overhead")
 
     # Wrap in DDP after compile but before optimizer creation
@@ -227,7 +233,9 @@ def main():
                     y,
                     return_stats=True,
                 )
-            scaler.scale(loss_sum).backward()
+            safe_loss = loss_sum / SAFE_DIVISOR
+            scaler.scale(safe_loss).backward()
+            # Accumulate the true (un-divided) loss sum for correct metric logging.
             accumulated_loss_sum += loss_sum.detach().item()
             accumulated_valid_tokens += valid_tokens.detach().item()
             
@@ -237,7 +245,7 @@ def main():
             valid_token_tensor = torch.tensor(accumulated_valid_tokens, device=DEVICE, dtype=torch.float32)
             torch.distributed.all_reduce(valid_token_tensor, op=torch.distributed.ReduceOp.SUM)
             global_valid_tokens = valid_token_tensor.item()
-        grad_scale = world_size / max(global_valid_tokens, 1.0)
+        grad_scale = (world_size * SAFE_DIVISOR) / max(global_valid_tokens, 1.0)
         for param in model.parameters():
             if param.grad is not None:
                 param.grad.mul_(grad_scale)

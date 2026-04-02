@@ -34,6 +34,7 @@ class Muon(torch.optim.Optimizer):
     def __init__(self, params, lr=1e-3, momentum=0.95, ns_steps=3):
         defaults = dict(lr=lr, momentum=momentum, ns_steps=ns_steps)
         super().__init__(params, defaults)
+        self.ns_workspaces = {}
 
     @staticmethod
     def _get_ns_workspace(workspaces, shape, device, dtype):
@@ -49,7 +50,8 @@ class Muon(torch.optim.Optimizer):
         return workspaces[key]
 
     def step(self):
-        ns_workspaces = {}
+        if len(self.ns_workspaces) > 16:
+            self.ns_workspaces.clear()
         for group in self.param_groups:
             lr = group['lr']
             momentum = group['momentum']
@@ -57,7 +59,8 @@ class Muon(torch.optim.Optimizer):
             for p in group['params']:
                 if p.grad is None: continue
                 
-                g = p.grad.data.float()
+                with torch.no_grad():
+                    g = p.grad.to(torch.float32)
                 p.grad = None  # Free BF16 gradient memory (G5)
                 
                 state = self.state[p]
@@ -69,7 +72,7 @@ class Muon(torch.optim.Optimizer):
                 
                 a, b, c = (3.4445, -4.7750, 2.0315)
                 X = buf / (buf.norm(keepdim=True) + 1e-8)  # New tensor, buf stays intact (G4)
-                workspace = self._get_ns_workspace(ns_workspaces, X.shape, X.device, X.dtype)
+                workspace = self._get_ns_workspace(self.ns_workspaces, X.shape, X.device, X.dtype)
                 A = workspace['a']
                 AA = workspace['aa']
                 B = workspace['b']

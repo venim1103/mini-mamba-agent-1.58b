@@ -154,34 +154,35 @@ def run_pipeline(args):
 
     count = 0
     with open(out_path, "w") as fout:
-        for text in iter_source_texts(args.input):
-            if count >= args.num_samples:
-                break
+        with torch.no_grad():
+            for text in iter_source_texts(args.input):
+                if count >= args.num_samples:
+                    break
 
-            text = truncate_source(text, tokenizer, max_source_tokens=args.max_source_tokens)
-            prompt = prompt_template.format(text=text)
-            input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(DEVICE)
+                text = truncate_source(text, tokenizer, max_source_tokens=args.max_source_tokens)
+                prompt = prompt_template.format(text=text)
+                input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(DEVICE)
 
-            if input_ids.shape[1] > 2048:
-                continue  # skip overly long prompts
+                if input_ids.shape[1] > 2048:
+                    continue  # skip overly long prompts
 
-            output_ids = model.generate(
-                input_ids, max_new_tokens=args.max_new_tokens,
-                temperature=args.temperature, do_sample=(args.temperature > 0),
-                eos_token_id=eos_id,
-            )
-            gen_text = tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True)
+                output_ids = model.generate(
+                    input_ids, max_new_tokens=args.max_new_tokens,
+                    temperature=args.temperature, do_sample=(args.temperature > 0),
+                    eos_token_id=eos_id,
+                )
+                gen_text = tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True)
 
-            record = {
-                "strategy": args.strategy,
-                "source": text[:500],  # truncated source for provenance
-                "generated": gen_text,
-            }
-            fout.write(json.dumps(record, ensure_ascii=False) + "\n")
-            count += 1
+                record = {
+                    "strategy": args.strategy,
+                    "source": text[:500],  # truncated source for provenance
+                    "generated": gen_text,
+                }
+                fout.write(json.dumps(record, ensure_ascii=False) + "\n")
+                count += 1
 
-            if count % 100 == 0:
-                print(f"  Generated {count}/{args.num_samples}")
+                if count % 100 == 0:
+                    print(f"  Generated {count}/{args.num_samples}")
 
     print(f"Done. Wrote {count} samples to {out_path}")
 
