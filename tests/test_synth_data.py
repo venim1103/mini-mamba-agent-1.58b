@@ -101,3 +101,56 @@ class TestSynthDataUtils:
         
         assert len(results) == 2
         mock_load_dataset.assert_called_once()
+
+
+class TestRunPipelineIntegration:
+    """Tiny integration test: runs the full synthetic data pipeline on CPU."""
+
+    @patch('synth_data.AutoTokenizer.from_pretrained')
+    @patch('synth_data.iter_source_texts', return_value=["dummy text 1 " * 5, "dummy text 2 " * 5])
+    def test_run_pipeline_completes_and_writes_jsonl(
+        self, mock_iter, mock_tok_cls, tmp_path, monkeypatch
+    ):
+        import synth_data
+        from model import BitMambaLLM
+        from argparse import Namespace
+        import json
+        import torch
+        from unittest.mock import MagicMock
+
+        TINY_CFG = dict(vocab_size=64, dim=32, n_layers=1, d_state=16,
+                        expand=2, use_checkpoint=False)
+
+        monkeypatch.setattr(synth_data, 'DEVICE', 'cpu')
+        monkeypatch.setattr(synth_data, 'MODEL_CONFIG', TINY_CFG)
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.encode.return_value = [1, 2, 3]
+        mock_tokenizer.decode.return_value = "dummy generation"
+        mock_inputs = MagicMock()
+        mock_inputs.input_ids = torch.tensor([[1, 2, 3]])
+        mock_tokenizer.return_value = mock_inputs
+        mock_tok_cls.return_value = mock_tokenizer
+
+        tiny_model = BitMambaLLM(**TINY_CFG)
+        with patch('synth_data.BitMambaLLM', return_value=tiny_model):
+            args = Namespace(
+                strategy="diverse_qa",
+                input="dummy_input",
+                output=str(tmp_path),
+                checkpoint="dummy.pt",
+                num_samples=2,
+                max_new_tokens=5,
+                max_source_tokens=512,
+                temperature=0.0,
+            )
+            synth_data.run_pipeline(args)
+
+        out_file = tmp_path / "diverse_qa.jsonl"
+        assert out_file.exists()
+        lines = [l for l in out_file.read_text().strip().split('\n') if l]
+        assert len(lines) == 2
+        for line in lines:
+            record = json.loads(line)
+            assert record["strategy"] == "diverse_qa"
+            assert record["generated"] == "dummy generation"

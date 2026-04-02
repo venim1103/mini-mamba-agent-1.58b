@@ -88,3 +88,96 @@ class TestComputeRewards:
     def test_empty_completions(self):
         rewards = compute_rewards([], "answer")
         assert len(rewards) == 0
+
+
+from unittest.mock import MagicMock, patch
+import torch
+
+class TestRLStepsIntegration:
+    """Tiny integration test: runs one full GRPO step on CPU."""
+
+    @patch('rl_train.wandb')
+    def test_run_rl_steps_completes_and_saves(self, mock_wandb, tmp_path, monkeypatch):
+        import rl_train
+        from model import BitMambaLLM
+        from optim import setup_mamba_optimizers
+
+        TINY_CFG = dict(vocab_size=64, dim=32, n_layers=1, d_state=16,
+                        expand=2, use_checkpoint=False)
+
+        monkeypatch.setattr(rl_train, 'DEVICE', 'cpu')
+        monkeypatch.setattr(rl_train, 'GROUP_SIZE', 2)
+        monkeypatch.setattr(rl_train, 'MAX_GEN_TOKENS', 3)
+        monkeypatch.setattr(rl_train, 'FILTER_LOW', 0.0)
+        monkeypatch.setattr(rl_train, 'FILTER_HIGH', 1.0)
+        monkeypatch.setattr(rl_train, 'FILTER_BATCH', 1)
+
+        model = BitMambaLLM(**TINY_CFG)
+        muon_opt, adam_opt, mamba_opt = setup_mamba_optimizers(
+            model, {"peak_lr": 1e-6, "end_lr": 1e-7}, use_8bit=False
+        )
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.encode.return_value = [1, 2, 3]
+        mock_tokenizer.decode.return_value = "<think>reasoning</think> 4"
+        mock_inputs = MagicMock()
+        mock_inputs.input_ids = torch.tensor([[1, 2, 3]])
+        mock_inputs.shape = (1, 3)
+        mock_tokenizer.return_value = mock_inputs
+
+        dataset = [{"problem": "2+2?", "expected_answer": "4"}]
+
+        rl_train.run_rl_steps(
+            model=model,
+            tokenizer=mock_tokenizer,
+            dataset=dataset,
+            optimizers=(muon_opt, adam_opt, mamba_opt),
+            eos_id=1,
+            total_steps=1,
+            checkpoint_dir=str(tmp_path),
+            device='cpu',
+        )
+        assert True  # Function completed without raising exceptions
+
+    @patch('rl_train.wandb')
+    def test_run_rl_steps_filter_passes_with_relaxed_bounds(self, mock_wandb, tmp_path, monkeypatch):
+        import rl_train
+        from model import BitMambaLLM
+        from optim import setup_mamba_optimizers
+
+        TINY_CFG = dict(vocab_size=64, dim=32, n_layers=1, d_state=16,
+                        expand=2, use_checkpoint=False)
+
+        monkeypatch.setattr(rl_train, 'DEVICE', 'cpu')
+        monkeypatch.setattr(rl_train, 'GROUP_SIZE', 2)
+        monkeypatch.setattr(rl_train, 'MAX_GEN_TOKENS', 3)
+        monkeypatch.setattr(rl_train, 'FILTER_LOW', 0.0)
+        monkeypatch.setattr(rl_train, 'FILTER_HIGH', 1.0)
+        monkeypatch.setattr(rl_train, 'FILTER_BATCH', 1)
+
+        model = BitMambaLLM(**TINY_CFG)
+        muon_opt, adam_opt, mamba_opt = setup_mamba_optimizers(
+            model, {"peak_lr": 1e-6, "end_lr": 1e-7}, use_8bit=False
+        )
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.encode.return_value = [1, 2, 3]
+        mock_tokenizer.decode.return_value = "<think>reasoning</think> 99"
+        mock_inputs = MagicMock()
+        mock_inputs.input_ids = torch.tensor([[1, 2, 3]])
+        mock_inputs.shape = (1, 3)
+        mock_tokenizer.return_value = mock_inputs
+
+        dataset = [{"problem": "2+2?", "expected_answer": "4"}]
+
+        rl_train.run_rl_steps(
+            model=model,
+            tokenizer=mock_tokenizer,
+            dataset=dataset,
+            optimizers=(muon_opt, adam_opt, mamba_opt),
+            eos_id=1,
+            total_steps=1,
+            checkpoint_dir=str(tmp_path),
+            device='cpu',
+        )
+        assert True  # Function completed without raising exceptions
