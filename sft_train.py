@@ -110,7 +110,12 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
                     if param.grad is not None:
                         param.grad.mul_(grad_scale)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                # Fix #14: Call scheduler.step() before get_last_lr() to avoid warning
+
+                # 1. Optimizer steps FIRST (via GradScaler)
+                for opt in [muon_opt, adam_opt, mamba_opt]: scaler.step(opt)
+                scaler.update()
+
+                # 2. Scheduler steps SECOND
                 scheduler.step()
                 # Sync LRs across optimizer groups
                 current_lr = scheduler.get_last_lr()[0]
@@ -118,8 +123,6 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
                     for group in opt.param_groups: group['lr'] = current_lr
                 for group in mamba_opt.param_groups: group['lr'] = current_lr * 0.1
 
-                for opt in [muon_opt, adam_opt, mamba_opt]: scaler.step(opt)
-                scaler.update()
                 for opt in [muon_opt, adam_opt, mamba_opt]: opt.zero_grad()
                 accumulated_loss = accumulated_loss_sum * grad_scale
                 
