@@ -133,12 +133,15 @@ class TestRunPipelineIntegration:
         mock_tok_cls.return_value = mock_tokenizer
 
         tiny_model = BitMambaLLM(**TINY_CFG)
+        dummy_ckpt = tmp_path / "dummy.pt"
+        torch.save({"model_state_dict": tiny_model.state_dict()}, dummy_ckpt)
+
         with patch('synth_data.BitMambaLLM', return_value=tiny_model):
             args = Namespace(
                 strategy="diverse_qa",
                 input="dummy_input",
                 output=str(tmp_path),
-                checkpoint="dummy.pt",
+                checkpoint=str(dummy_ckpt),
                 num_samples=2,
                 max_new_tokens=5,
                 max_source_tokens=512,
