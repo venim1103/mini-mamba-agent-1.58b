@@ -467,7 +467,7 @@ def _run_sentencepiece_backend():
         "--output-dir",
         OUTPUT_DIR,
         "--model-type",
-        os.getenv("TOKENIZER_SPM_MODEL_TYPE", "bpe"),
+        os.getenv("TOKENIZER_SPM_MODEL_TYPE", "unigram"),
     ]
 
     input_sentence_size = os.getenv("TOKENIZER_SPM_INPUT_SENTENCE_SIZE")

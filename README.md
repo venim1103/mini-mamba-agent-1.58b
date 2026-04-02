@@ -234,7 +234,7 @@ Optional controls:
 - `TOKENIZER_MAX_BATCH_EXAMPLES`: max documents buffered before flushing to the trainer (default: `128` standard, `96` kaggle)
 - `TOKENIZER_MAX_BATCH_CHARACTERS`: max total characters buffered before flushing (default: `2000000` standard, `1200000` kaggle)
 - `TOKENIZER_PARQUET_BATCH_SIZE`: rows read at a time from parquet files (default: `256` standard, `192` kaggle)
-- `TOKENIZER_SPM_MODEL_TYPE`: SentencePiece model type used by backend `spm` (`bpe` or `unigram`, default: `bpe`)
+- `TOKENIZER_SPM_MODEL_TYPE`: SentencePiece model type used by backend `spm` (`bpe` or `unigram`, default: `unigram`)
 - `TOKENIZER_SPM_INPUT_SENTENCE_SIZE`: optional override passed to SentencePiece backend
 - `TOKENIZER_SPM_MAX_SENTENCE_LENGTH`: optional override passed to SentencePiece backend
 
@@ -243,7 +243,7 @@ Optional controls:
 For tighter memory limits, or if the Hugging Face BPE path still OOMs during `Tokenize words` / `Compute merges`, use the separate SentencePiece trainer:
 
 ```bash
-python train_tokenizer_spm.py --profile kaggle --model-type bpe --vocab-size 64000
+python train_tokenizer_spm.py --profile kaggle --model-type unigram --vocab-size 64000
 ```
 
 This path builds a domain-balanced sampled corpus, trains SentencePiece with bounded `input_sentence_size`, and exports HuggingFace tokenizer files into `custom_agentic_tokenizer_spm/`.

@@ -33,7 +33,7 @@ def _resolve_profile(explicit_profile):
 
 SPM_PROFILE_DEFAULTS = {
     "standard": {
-        "input_sentence_size": 2_000_000,
+        "input_sentence_size": 750_000,
         "max_sentence_length": 2048,
         "domain_quota": {
             "logic": 350_000,
@@ -44,7 +44,7 @@ SPM_PROFILE_DEFAULTS = {
         },
     },
     "kaggle": {
-        "input_sentence_size": 1_000_000,
+        "input_sentence_size": 500_000,
         "max_sentence_length": 1600,
         "domain_quota": {
             "logic": 220_000,
@@ -61,7 +61,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train a low-RAM SentencePiece tokenizer.")
     parser.add_argument("--profile", choices=["kaggle", "standard"], help="Training profile.")
     parser.add_argument("--vocab-size", type=int, default=64_000)
-    parser.add_argument("--model-type", choices=["bpe", "unigram"], default="bpe")
+    parser.add_argument("--model-type", choices=["bpe", "unigram"], default="unigram")
     parser.add_argument("--character-coverage", type=float, default=0.9995)
     parser.add_argument("--output-dir", default="custom_agentic_tokenizer_spm")
     parser.add_argument(
@@ -134,22 +134,39 @@ def _build_temp_corpus(profile, max_sentence_length):
 
 
 def _export_hf_tokenizer(spm_model_path, output_dir):
+    processor = spm.SentencePieceProcessor(model_file=spm_model_path)
+
     try:
-        from transformers import LlamaTokenizerFast
+        from tokenizers import Tokenizer
+        from tokenizers.decoders import Metaspace as MetaspaceDecoder
+        from tokenizers.models import Unigram
+        from tokenizers.normalizers import NFKC
+        from tokenizers.pre_tokenizers import Metaspace
+        from transformers import PreTrainedTokenizerFast
     except Exception as exc:  # pragma: no cover
-        print(f"Skipping HuggingFace export (LlamaTokenizerFast unavailable): {exc}")
+        print(f"Skipping HuggingFace export (fast tokenizer dependencies unavailable): {exc}")
         return
 
-    tokenizer = LlamaTokenizerFast(
-        vocab_file=spm_model_path,
-        bos_token="<s>",
-        eos_token="<|eos|>",
-        unk_token="<|unk|>",
-        pad_token="<|pad|>",
-        additional_special_tokens=["<|im_start|>", "<|im_end|>", "<think>", "</think>"],
-    )
-    tokenizer.save_pretrained(output_dir)
-    print(f"Saved HuggingFace tokenizer files to ./{output_dir}")
+    try:
+        vocab = [(processor.id_to_piece(i), processor.get_score(i)) for i in range(processor.vocab_size())]
+        backend = Tokenizer(Unigram(vocab, unk_id=processor.unk_id()))
+        backend.normalizer = NFKC()
+        backend.pre_tokenizer = Metaspace(replacement="▁", prepend_scheme="first")
+        backend.decoder = MetaspaceDecoder(replacement="▁", prepend_scheme="first")
+
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=backend,
+            bos_token="<s>",
+            eos_token="<|eos|>",
+            unk_token="<|unk|>",
+            pad_token="<|pad|>",
+            additional_special_tokens=["<|im_start|>", "<|im_end|>", "<think>", "</think>"],
+        )
+        tokenizer.save_pretrained(output_dir)
+        print(f"Saved HuggingFace tokenizer files to ./{output_dir}")
+    except Exception as exc:  # pragma: no cover
+        print(f"Error during HuggingFace tokenizer export: {exc}")
+        raise
 
 
 def main():
