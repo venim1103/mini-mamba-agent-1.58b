@@ -97,7 +97,7 @@ class TestRunSFTStageIntegration:
         monkeypatch.setattr(sft_train, 'CHECKPOINT_DIR', str(tmp_path))
         monkeypatch.setattr(sft_train, 'BATCH_SIZE', TINY_BATCH)
         monkeypatch.setattr(sft_train, 'GRAD_ACCUM_STEPS', 1)
-        monkeypatch.setattr(sft_train, 'SAFE_DIVISOR', float(TINY_BATCH * SEQ_LEN))
+        monkeypatch.setattr(sft_train, 'SAFE_DIVISOR', float(16384))
 
         x = torch.randint(0, 64, (TINY_BATCH, SEQ_LEN))
         y = torch.randint(0, 64, (TINY_BATCH, SEQ_LEN))
