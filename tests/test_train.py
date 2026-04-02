@@ -1,7 +1,7 @@
 import pytest
 import torch
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Mock ALL heavy dependencies BEFORE any imports
 _mocked_modules = {
@@ -172,3 +172,81 @@ class TestSafeDivisorMath:
 
         assert torch.allclose(grad_scaled, grad_direct, atol=1e-5), \
             "SAFE_DIVISOR scaling produced different gradients than direct scaling"
+
+
+class TestRunTrainingStepsIntegration:
+    """Tiny integration test: runs two full pretraining steps on CPU."""
+
+    @patch('train.wandb')
+    @patch('train.barrier')
+    @patch('train.is_main_process', return_value=True)
+    @patch('train.create_dataloaders')
+    def test_run_training_steps_completes_and_saves(
+        self, mock_create_dl, mock_is_main, mock_barrier, mock_wandb,
+        tmp_path, monkeypatch
+    ):
+        import train
+        from model import BitMambaLLM
+        from optim import setup_mamba_optimizers, FGWSD_Scheduler
+
+        TINY_CFG = dict(vocab_size=64, dim=32, n_layers=1, d_state=16,
+                        expand=2, use_checkpoint=False)
+        TINY_BATCH = 2
+        SEQ_LEN = 16
+        TOTAL = 2
+
+        monkeypatch.setattr(train, 'DEVICE', 'cpu')
+        monkeypatch.setattr(train, 'CHECKPOINT_DIR', str(tmp_path))
+        monkeypatch.setattr(train, 'BATCH_SIZE', TINY_BATCH)
+        monkeypatch.setattr(train, 'GRAD_ACCUM_STEPS', 1)
+        monkeypatch.setattr(train, 'SAVE_EVERY', 1)
+        monkeypatch.setattr(train, 'SAFE_DIVISOR', float(TINY_BATCH * 16384))
+
+        model = BitMambaLLM(**TINY_CFG)
+        muon_opt, adam_opt, mamba_core_opt = setup_mamba_optimizers(
+            model, {"peak_lr": 1e-4, "end_lr": 1e-6}, use_8bit=False
+        )
+
+        tiny_phases = [{"pct": 1.0, "ctx": SEQ_LEN}]
+        tiny_curriculum = {"peak_lr": 1e-4, "end_lr": 1e-6, "phases": tiny_phases}
+        scheduler = FGWSD_Scheduler(
+            muon_opt, adam_opt, mamba_core_opt,
+            total_steps=TOTAL, config=tiny_curriculum
+        )
+
+        scaler = torch.amp.GradScaler(enabled=False)
+
+        def make_batch():
+            x = torch.randint(0, 64, (TINY_BATCH, SEQ_LEN))
+            y = torch.randint(0, 64, (TINY_BATCH, SEQ_LEN))
+            cu = torch.tensor([[0, SEQ_LEN, -1], [0, SEQ_LEN, -1]], dtype=torch.int32)
+            n_segs = torch.tensor([2, 2], dtype=torch.int32)
+            return x, y, cu, n_segs
+
+        def infinite_iter():
+            while True:
+                yield make_batch()
+
+        mock_loader = MagicMock()
+        mock_loader.__iter__ = MagicMock(side_effect=infinite_iter)
+        mock_create_dl.return_value = (mock_loader, MagicMock())
+
+        train.run_training_steps(
+            model=model,
+            raw_model=model,
+            optimizers=(muon_opt, adam_opt, mamba_core_opt),
+            scheduler=scheduler,
+            train_loader=mock_loader,
+            scaler=scaler,
+            total_steps=TOTAL,
+            checkpoint_dir=str(tmp_path),
+            device='cpu',
+            world_size=1,
+        )
+
+        ckpt_files = list(tmp_path.glob("*.pt"))
+        assert len(ckpt_files) == 1, f"Expected 1 checkpoint, found: {ckpt_files}"
+
+        ckpt = torch.load(ckpt_files[0], map_location='cpu', weights_only=True)
+        assert 'model_state_dict' in ckpt
+        assert 'step' in ckpt

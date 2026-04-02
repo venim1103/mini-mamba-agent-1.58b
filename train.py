@@ -139,6 +139,107 @@ def create_seq_idx_batch(cu_seqlens_padded, n_segs, seqlen):
             seq_idx[b, start:end] = i
     return seq_idx
 
+
+def run_training_steps(model, raw_model, optimizers, scheduler,
+                       train_loader, scaler, total_steps,
+                       checkpoint_dir, device, world_size=1):
+    """Inner training loop, decoupled from DDP setup, wandb init, and torch.compile.
+
+    Args:
+        model:          DDP-wrapped (or bare) model for forward passes
+        raw_model:      Unwrapped model for state_dict saves and output head access
+        optimizers:     Tuple of (muon_opt, adam_opt, mamba_core_opt)
+        scheduler:      FGWSD_Scheduler instance
+        train_loader:   Initial DataLoader (recreated internally on phase change)
+        scaler:         torch.amp.GradScaler (disabled on CPU)
+        total_steps:    Number of optimizer steps to run
+        checkpoint_dir: Directory to write step checkpoints into
+        device:         String device identifier ('cpu' or 'cuda:N')
+        world_size:     Number of distributed ranks (1 for single-GPU)
+    """
+    muon_opt, adam_opt, mamba_core_opt = optimizers
+    data_iter = iter(train_loader)
+    total_tokens = 0
+    t0 = time.time()
+    previous_ctx = scheduler.get_lr_and_ctx(0)[1]
+    previous_phase = "Phase_1"
+
+    for step in range(total_steps):
+        current_lr, current_ctx, phase_name = scheduler.step(step)
+
+        need_reload = False
+        if phase_name != previous_phase and phase_name != "Complete" and previous_phase is not None:
+            need_reload = True
+            if is_main_process():
+                print(f"  [FG-WSD] Phase changed to {phase_name}: data quality updated")
+                wandb.log({"System/FG_WSD_Phase": phase_name}, step=step)
+        if current_ctx != previous_ctx:
+            need_reload = True
+
+        if need_reload:
+            train_loader, _ = create_dataloaders(
+                TRAIN_CONFIGS.get(phase_name, TRAIN_CONFIG), tokenizer_path="custom_agentic_tokenizer",
+                max_seq_len=current_ctx, batch_size=BATCH_SIZE
+            )
+            data_iter = iter(train_loader)
+            previous_ctx = current_ctx
+
+        previous_phase = phase_name
+
+        for opt in [muon_opt, adam_opt, mamba_core_opt]: opt.zero_grad()
+        accumulated_loss_sum = 0.0
+        accumulated_valid_tokens = 0
+
+        for _ in range(GRAD_ACCUM_STEPS):
+            x, y, cu_seqlens, n_segs = next(data_iter)
+
+            x, y = x.to(device)[:, :current_ctx], y.to(device)[:, :current_ctx]
+            seq_idx = create_seq_idx_batch(cu_seqlens, n_segs, current_ctx)
+
+            with maybe_autocast(device, amp_dtype=AMP_DTYPE):
+                hidden = model.forward_hidden(x, seq_idx=seq_idx)
+                loss_sum, valid_tokens = chunked_cross_entropy(
+                    hidden,
+                    raw_model.output,
+                    y,
+                    return_stats=True,
+                )
+            safe_loss = loss_sum / SAFE_DIVISOR
+            scaler.scale(safe_loss).backward()
+            accumulated_loss_sum += loss_sum.detach().item()
+            accumulated_valid_tokens += valid_tokens.detach().item()
+
+        for opt in [muon_opt, adam_opt, mamba_core_opt]: scaler.unscale_(opt)
+        global_valid_tokens = accumulated_valid_tokens
+        if world_size > 1:
+            valid_token_tensor = torch.tensor(accumulated_valid_tokens, device=device, dtype=torch.float32)
+            torch.distributed.all_reduce(valid_token_tensor, op=torch.distributed.ReduceOp.SUM)
+            global_valid_tokens = valid_token_tensor.item()
+        grad_scale = (world_size * SAFE_DIVISOR) / max(global_valid_tokens, 1.0)
+        for param in model.parameters():
+            if param.grad is not None:
+                param.grad.mul_(grad_scale)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        for opt in [muon_opt, adam_opt, mamba_core_opt]: scaler.step(opt)
+        scaler.update()
+
+        accumulated_loss = accumulated_loss_sum * grad_scale
+
+        tokens_this_step = BATCH_SIZE * GRAD_ACCUM_STEPS * current_ctx
+        total_tokens += tokens_this_step
+
+        if step % 10 == 0 and is_main_process():
+            t1 = time.time()
+            dt, t0 = t1 - t0, t1
+            toks = tokens_this_step * world_size
+            print(f"Step {step:06d} | {phase_name:<15} | Loss: {accumulated_loss:.4f} | Tok/s: {toks/dt:.0f}")
+            wandb.log({"Train/Loss": accumulated_loss, "System/Total_Tokens": total_tokens * world_size}, step=step)
+
+        if step > 0 and step % SAVE_EVERY == 0 and is_main_process():
+            torch.save({'step': step, 'model_state_dict': raw_model.state_dict()}, os.path.join(checkpoint_dir, f"step_{step:06d}.pt"))
+        barrier()
+
+
 def main():
     global DEVICE
     rank, local_rank, world_size, device = setup_distributed()
@@ -184,91 +285,21 @@ def main():
         max_seq_len=initial_ctx, batch_size=BATCH_SIZE
     )
     model.train()
-    data_iter = iter(train_loader)
-    total_tokens, t0 = 0, time.time()
-    previous_ctx = initial_ctx
-    previous_phase = "Phase_1"  # Track phase changes for FG-WSD data quality progression
     # G10: GradScaler for FP16 (no-op when using BF16)
     scaler = torch.amp.GradScaler(enabled=(DEVICE.startswith("cuda") and AMP_DTYPE == torch.float16))
     
-    for step in range(TOTAL_STEPS):
-        current_lr, current_ctx, phase_name = scheduler.step(step)
-        
-        # FG-WSD: Recreate DataLoader when phase or context window changes
-        need_reload = False
-        if phase_name != previous_phase and phase_name != "Complete" and previous_phase is not None:
-            need_reload = True
-            if is_main_process():
-                print(f"  [FG-WSD] Phase changed to {phase_name}: data quality updated")
-                wandb.log({"System/FG_WSD_Phase": phase_name}, step=step)
-        if current_ctx != previous_ctx:
-            need_reload = True
-        
-        if need_reload:
-            train_loader, _ = create_dataloaders(
-                TRAIN_CONFIGS.get(phase_name, TRAIN_CONFIG), tokenizer_path="custom_agentic_tokenizer",
-                max_seq_len=current_ctx, batch_size=BATCH_SIZE
-            )
-            data_iter = iter(train_loader)
-            previous_ctx = current_ctx
-        
-        previous_phase = phase_name
-        
-        for opt in [muon_opt, adam_opt, mamba_core_opt]: opt.zero_grad()
-        accumulated_loss_sum = 0.0
-        accumulated_valid_tokens = 0
-        
-        for _ in range(GRAD_ACCUM_STEPS):
-            x, y, cu_seqlens, n_segs = next(data_iter)
-            
-            x, y = x.to(DEVICE)[:, :current_ctx], y.to(DEVICE)[:, :current_ctx]
-            seq_idx = create_seq_idx_batch(cu_seqlens, n_segs, current_ctx)
-            
-            with maybe_autocast(DEVICE, amp_dtype=AMP_DTYPE):
-                # G2: Chunked cross-entropy avoids materializing full [BS, ctx, vocab] logits
-                hidden = model.forward_hidden(x, seq_idx=seq_idx)
-                loss_sum, valid_tokens = chunked_cross_entropy(
-                    hidden,
-                    raw_model.output,
-                    y,
-                    return_stats=True,
-                )
-            safe_loss = loss_sum / SAFE_DIVISOR
-            scaler.scale(safe_loss).backward()
-            # Accumulate the true (un-divided) loss sum for correct metric logging.
-            accumulated_loss_sum += loss_sum.detach().item()
-            accumulated_valid_tokens += valid_tokens.detach().item()
-            
-        for opt in [muon_opt, adam_opt, mamba_core_opt]: scaler.unscale_(opt)
-        global_valid_tokens = accumulated_valid_tokens
-        if world_size > 1:
-            valid_token_tensor = torch.tensor(accumulated_valid_tokens, device=DEVICE, dtype=torch.float32)
-            torch.distributed.all_reduce(valid_token_tensor, op=torch.distributed.ReduceOp.SUM)
-            global_valid_tokens = valid_token_tensor.item()
-        grad_scale = (world_size * SAFE_DIVISOR) / max(global_valid_tokens, 1.0)
-        for param in model.parameters():
-            if param.grad is not None:
-                param.grad.mul_(grad_scale)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        for opt in [muon_opt, adam_opt, mamba_core_opt]: scaler.step(opt)
-        scaler.update()
-
-        accumulated_loss = accumulated_loss_sum * grad_scale
-        
-        # Fix #7: Count tokens every step, not just every 10 steps
-        tokens_this_step = BATCH_SIZE * GRAD_ACCUM_STEPS * current_ctx
-        total_tokens += tokens_this_step
-        
-        if step % 10 == 0 and is_main_process():
-            t1 = time.time()
-            dt, t0 = t1 - t0, t1
-            toks = tokens_this_step * world_size  # count tokens across all ranks
-            print(f"Step {step:06d} | {phase_name:<15} | Loss: {accumulated_loss:.4f} | Tok/s: {toks/dt:.0f}")
-            wandb.log({"Train/Loss": accumulated_loss, "System/Total_Tokens": total_tokens * world_size}, step=step)
-
-        if step > 0 and step % SAVE_EVERY == 0 and is_main_process():
-            torch.save({'step': step, 'model_state_dict': raw_model.state_dict()}, os.path.join(CHECKPOINT_DIR, f"step_{step:06d}.pt"))
-        barrier()  # sync before next step
+    run_training_steps(
+        model=model,
+        raw_model=raw_model,
+        optimizers=(muon_opt, adam_opt, mamba_core_opt),
+        scheduler=scheduler,
+        train_loader=train_loader,
+        scaler=scaler,
+        total_steps=TOTAL_STEPS,
+        checkpoint_dir=CHECKPOINT_DIR,
+        device=DEVICE,
+        world_size=world_size,
+    )
 
     if is_main_process():
         wandb.finish()
