@@ -82,14 +82,22 @@ class TestSynthDataUtils:
         tok.decode.assert_not_called()
         assert result == "short text"
 
-    def test_iter_source_texts_yields_from_jsonl(self, tmp_path):
+    @patch("synth_data.load_dataset")
+    def test_iter_source_texts_yields_from_jsonl(self, mock_load_dataset, tmp_path):
         from synth_data import iter_source_texts
+        
         long_text_1 = "hello world " * 5
         long_text_2 = "another document here " * 3
+        
+        mock_load_dataset.return_value = [
+            {"text": long_text_1},
+            {"text": long_text_2}
+        ]
+        
         f = tmp_path / "data.jsonl"
-        f.write_text(
-            f'{{"text": "{long_text_1}"}}\n'
-            f'{{"text": "{long_text_2}"}}\n'
-        )
+        f.write_text("dummy")
+        
         results = list(iter_source_texts(str(tmp_path)))
+        
         assert len(results) == 2
+        mock_load_dataset.assert_called_once()
