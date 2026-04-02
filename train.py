@@ -221,12 +221,12 @@ def run_training_steps(model, raw_model, optimizers, scheduler,
                 param.grad.mul_(grad_scale)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-        # 1. Optimizer steps FIRST (via GradScaler)
-        for opt in [muon_opt, adam_opt, mamba_core_opt]: scaler.step(opt)
+        scaler.step(muon_opt)
+        scaler.step(adam_opt)
+        scaler.step(mamba_core_opt)
         scaler.update()
 
-        # 2. Scheduler steps SECOND
-        scheduler.step()
+        for opt in [muon_opt, adam_opt, mamba_core_opt]: opt.zero_grad()
 
         accumulated_loss = accumulated_loss_sum * grad_scale
 

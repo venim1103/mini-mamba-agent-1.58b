@@ -112,11 +112,15 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
                 # 1. Optimizer steps FIRST (via GradScaler)
+                scale_before = scaler.get_scale()
                 for opt in [muon_opt, adam_opt, mamba_opt]: scaler.step(opt)
                 scaler.update()
 
                 # 2. Scheduler steps SECOND
-                scheduler.step()
+                # PyTorch GradScaler rule: only step scheduler if scaler didn't skip
+                if scale_before <= scaler.get_scale():
+                    scheduler.step()
+
                 # Sync LRs across optimizer groups
                 current_lr = scheduler.get_last_lr()[0]
                 for opt in [muon_opt, adam_opt]:
