@@ -197,13 +197,7 @@ def run_training_steps(model, raw_model, optimizers, scheduler,
             seq_idx = create_seq_idx_batch(cu_seqlens, n_segs, current_ctx)
 
             with maybe_autocast(device, amp_dtype=AMP_DTYPE):
-                hidden = model.forward_hidden(x, seq_idx=seq_idx)
-                loss_sum, valid_tokens = chunked_cross_entropy(
-                    hidden,
-                    raw_model.output,
-                    y,
-                    return_stats=True,
-                )
+                loss_sum, valid_tokens = model(x, seq_idx=seq_idx, targets=y)
             safe_loss = loss_sum / SAFE_DIVISOR
             scaler.scale(safe_loss).backward()
             accumulated_loss_sum += loss_sum.detach().item()
