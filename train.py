@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import os
 import time
 import wandb
-from model import BitMambaLLM, chunked_cross_entropy, maybe_autocast
+from model import BitMambaLLM, maybe_autocast
 from data import create_dataloaders
 from optim import setup_mamba_optimizers, FGWSD_Scheduler
 from dist_utils import (
