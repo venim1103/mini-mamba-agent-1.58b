@@ -63,6 +63,15 @@ def parse_args():
     parser.add_argument("--vocab-size", type=int, default=64_000)
     parser.add_argument("--model-type", choices=["bpe", "unigram"], default="unigram")
     parser.add_argument("--character-coverage", type=float, default=0.9995)
+    parser.add_argument(
+        "--byte-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable SentencePiece byte fallback. Recommended for code so unseen bytes "
+            "are represented as byte pieces instead of <|unk|>."
+        ),
+    )
     parser.add_argument("--output-dir", default="custom_agentic_tokenizer_spm")
     parser.add_argument(
         "--input-sentence-size",
@@ -148,8 +157,20 @@ def _export_hf_tokenizer(spm_model_path, output_dir):
         return
 
     try:
+        byte_fallback = False
+        try:
+            from sentencepiece import sentencepiece_model_pb2 as sp_pb2
+
+            model_proto = sp_pb2.ModelProto()
+            with open(spm_model_path, "rb") as fh:
+                model_proto.ParseFromString(fh.read())
+            byte_fallback = bool(model_proto.trainer_spec.byte_fallback)
+        except Exception:
+            # Best-effort: if protobuf parsing is unavailable, keep legacy default.
+            pass
+
         vocab = [(processor.id_to_piece(i), processor.get_score(i)) for i in range(processor.vocab_size())]
-        backend = Tokenizer(Unigram(vocab, unk_id=processor.unk_id()))
+        backend = Tokenizer(Unigram(vocab, unk_id=processor.unk_id(), byte_fallback=byte_fallback))
         backend.normalizer = NFKC()
         backend.pre_tokenizer = Metaspace(replacement="▁", prepend_scheme="first")
         backend.decoder = MetaspaceDecoder(replacement="▁", prepend_scheme="first")
@@ -193,7 +214,8 @@ def main():
 
         print(
             f"Training SentencePiece ({args.model_type}) with vocab={args.vocab_size:,}, "
-            f"input_sentence_size={input_sentence_size:,}, max_sentence_length={max_sentence_length}."
+            f"input_sentence_size={input_sentence_size:,}, max_sentence_length={max_sentence_length}, "
+            f"byte_fallback={args.byte_fallback}."
         )
 
         spm.SentencePieceTrainer.train(
@@ -214,6 +236,7 @@ def main():
             bos_piece="<s>",
             eos_piece="<|eos|>",
             user_defined_symbols=["<|im_start|>", "<|im_end|>", "<think>", "</think>"],
+            byte_fallback=args.byte_fallback,
             num_threads=max(os.cpu_count() or 1, 1),
         )
     finally:
