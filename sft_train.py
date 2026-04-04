@@ -84,14 +84,7 @@ def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):
             x, y = x.to(DEVICE), y.to(DEVICE)
 
             with maybe_autocast(DEVICE, amp_dtype=AMP_DTYPE):
-                hidden = model.forward_hidden(x, seq_idx=None)
-                loss_sum, valid_tokens = chunked_cross_entropy(
-                    hidden[:, :-1, :],
-                    raw_model.output,
-                    y[..., 1:],
-                    ignore_index=-100,
-                    return_stats=True,
-                )
+                loss_sum, valid_tokens = model(x[:, :-1], seq_idx=None, targets=y[..., 1:])
             safe_loss = loss_sum / SAFE_DIVISOR
             scaler.scale(safe_loss).backward()
             # Accumulate the true (un-divided) loss sum for correct metric logging.

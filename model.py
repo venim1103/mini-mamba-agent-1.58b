@@ -673,8 +673,13 @@ class BitMambaLLM(nn.Module):
                 x = layer(x, seq_idx=seq_idx)
         return self.norm(x)
 
-    def forward(self, input_ids, seq_idx=None):
-        return self.output(self._backbone(input_ids, seq_idx))
+    def forward(self, input_ids, seq_idx=None, targets=None):
+        hidden_states = self._backbone(input_ids, seq_idx)
+        
+        if targets is not None:
+            return chunked_cross_entropy(hidden_states, self.output, targets, return_stats=True)
+            
+        return self.output(hidden_states)
 
     def forward_hidden(self, input_ids, seq_idx=None):
         """Return pre-logit hidden states (G2: for chunked cross-entropy)."""
