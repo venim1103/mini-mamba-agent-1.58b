@@ -70,6 +70,7 @@ class TestParseArgs:
         assert args.profile is None
         assert args.input_sentence_size is None
         assert args.max_sentence_length is None
+        assert args.code_fidelity_mode is False
 
     def test_explicit_args(self):
         argv = [
@@ -81,6 +82,7 @@ class TestParseArgs:
             "--output-dir", "/tmp/out",
             "--input-sentence-size", "500000",
             "--max-sentence-length", "1024",
+            "--code-fidelity-mode",
         ]
         with mock.patch.object(sys, "argv", argv):
             args = spm_mod.parse_args()
@@ -91,6 +93,7 @@ class TestParseArgs:
         assert args.output_dir == "/tmp/out"
         assert args.input_sentence_size == 500_000
         assert args.max_sentence_length == 1024
+        assert args.code_fidelity_mode is True
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +119,7 @@ class TestBuildTempCorpus:
         with contextlib.ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
-            return spm_mod._build_temp_corpus(profile, max_sentence_length)
+            return spm_mod._build_temp_corpus(profile, max_sentence_length, code_fidelity_mode=False)
 
     def _small_profile(self, logic_quota):
         return {
@@ -154,6 +157,20 @@ class TestBuildTempCorpus:
         path, _ = self._run_corpus({"/data/logic/a.jsonl": ["line1\nline2"]})
         try:
             assert Path(path).read_text().splitlines() == ["line1 line2"]
+        finally:
+            self._safe_remove(path)
+
+    def test_code_fidelity_mode_preserves_newline_boundaries(self):
+        file_texts = {"/data/logic/a.jsonl": ["line1\n  line2"]}
+        files = list(file_texts.keys())
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(spm_mod.base, "iter_data_files", return_value=iter(files)))
+            stack.enter_context(
+                mock.patch.object(spm_mod.base, "iter_file_texts", side_effect=lambda fp: iter(file_texts.get(fp, [])))
+            )
+            path, _ = spm_mod._build_temp_corpus("standard", 0, code_fidelity_mode=True)
+        try:
+            assert Path(path).read_text().splitlines() == ["line1", "  line2"]
         finally:
             self._safe_remove(path)
 
@@ -247,6 +264,8 @@ class TestMain:
         args.vocab_size = 64_000
         args.model_type = "bpe"
         args.character_coverage = 0.9995
+        args.byte_fallback = True
+        args.code_fidelity_mode = False
         args.output_dir = "custom_agentic_tokenizer_spm"
         args.input_sentence_size = None
         args.max_sentence_length = None
@@ -283,6 +302,7 @@ class TestMain:
 
         assert mock_corpus.call_args.kwargs["profile"] == "standard"
         assert mock_corpus.call_args.kwargs["max_sentence_length"] == 1024
+        assert mock_corpus.call_args.kwargs["code_fidelity_mode"] is False
         assert mock_train.call_args.kwargs["input_sentence_size"] == 500_000
         assert mock_train.call_args.kwargs["max_sentence_length"] == 1024
 
@@ -299,6 +319,7 @@ class TestMain:
 
         assert mock_corpus.call_args.kwargs["profile"] == "kaggle"
         assert mock_corpus.call_args.kwargs["max_sentence_length"] == 1600
+        assert mock_corpus.call_args.kwargs["code_fidelity_mode"] is False
         assert mock_train.call_args.kwargs["input_sentence_size"] == 500_000
         assert mock_train.call_args.kwargs["max_sentence_length"] == 1600
 

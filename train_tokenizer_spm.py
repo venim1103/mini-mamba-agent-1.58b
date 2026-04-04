@@ -83,6 +83,15 @@ def parse_args():
         type=int,
         help="Max sentence length passed to SPM trainer. Uses profile default if omitted.",
     )
+    parser.add_argument(
+        "--code-fidelity-mode",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Preserve code whitespace structure better by avoiding newline flattening in corpus "
+            "construction and disabling aggressive whitespace normalization in SPM."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -99,7 +108,7 @@ def _infer_domain(file_path):
     return "other"
 
 
-def _build_temp_corpus(profile, max_sentence_length):
+def _build_temp_corpus(profile, max_sentence_length, code_fidelity_mode=False):
     quotas = SPM_PROFILE_DEFAULTS[profile]["domain_quota"]
     domain_counts = defaultdict(int)
     total = 0
@@ -120,9 +129,15 @@ def _build_temp_corpus(profile, max_sentence_length):
                 if domain_counts[domain] >= quotas[domain]:
                     break
 
-                text = text.replace("\n", " ").strip()
-                if not text:
-                    continue
+                if code_fidelity_mode:
+                    # Keep line structure/indentation signal for code-heavy text.
+                    text = text.replace("\r\n", "\n").replace("\r", "\n")
+                    if not text.strip():
+                        continue
+                else:
+                    text = text.replace("\n", " ").strip()
+                    if not text:
+                        continue
 
                 if max_sentence_length > 0:
                     text = text[:max_sentence_length]
@@ -146,8 +161,13 @@ def _export_hf_tokenizer(spm_model_path, output_dir):
     processor = spm.SentencePieceProcessor(model_file=spm_model_path)
 
     try:
+        import sys
+
+        import sentencepiece.sentencepiece_model_pb2 as sp_pb2
         from tokenizers import Tokenizer
+        from tokenizers import decoders
         from tokenizers.decoders import Metaspace as MetaspaceDecoder
+        from tokenizers.implementations import SentencePieceUnigramTokenizer
         from tokenizers.models import Unigram
         from tokenizers.normalizers import NFKC
         from tokenizers.pre_tokenizers import Metaspace
@@ -155,6 +175,31 @@ def _export_hf_tokenizer(spm_model_path, output_dir):
     except Exception as exc:  # pragma: no cover
         print(f"Skipping HuggingFace export (fast tokenizer dependencies unavailable): {exc}")
         return
+
+    try:
+        # Preferred path: import directly from the .model to preserve SentencePiece behavior.
+        sys.modules.setdefault("sentencepiece_model_pb2", sp_pb2)
+        impl = SentencePieceUnigramTokenizer.from_spm(spm_model_path)
+        impl._tokenizer.decoder = decoders.Sequence(
+            [
+                decoders.ByteFallback(),
+                decoders.Metaspace(replacement="▁", prepend_scheme="always", split=True),
+            ]
+        )
+
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=impl._tokenizer,
+            bos_token="<s>",
+            eos_token="<|eos|>",
+            unk_token="<|unk|>",
+            pad_token="<|pad|>",
+            additional_special_tokens=["<|im_start|>", "<|im_end|>", "<think>", "</think>"],
+        )
+        tokenizer.save_pretrained(output_dir)
+        print(f"Saved HuggingFace tokenizer files to ./{output_dir}")
+        return
+    except Exception as spm_exc:
+        print(f"Direct SentencePiece export path unavailable, falling back to manual conversion: {spm_exc}")
 
     try:
         byte_fallback = False
@@ -173,7 +218,12 @@ def _export_hf_tokenizer(spm_model_path, output_dir):
         backend = Tokenizer(Unigram(vocab, unk_id=processor.unk_id(), byte_fallback=byte_fallback))
         backend.normalizer = NFKC()
         backend.pre_tokenizer = Metaspace(replacement="▁", prepend_scheme="first")
-        backend.decoder = MetaspaceDecoder(replacement="▁", prepend_scheme="first")
+        backend.decoder = decoders.Sequence(
+            [
+                decoders.ByteFallback(),
+                MetaspaceDecoder(replacement="▁", prepend_scheme="first"),
+            ]
+        )
 
         tokenizer = PreTrainedTokenizerFast(
             tokenizer_object=backend,
@@ -204,6 +254,7 @@ def main():
     corpus_path, total_lines = _build_temp_corpus(
         profile=profile,
         max_sentence_length=max_sentence_length,
+        code_fidelity_mode=args.code_fidelity_mode,
     )
 
     try:
@@ -215,7 +266,7 @@ def main():
         print(
             f"Training SentencePiece ({args.model_type}) with vocab={args.vocab_size:,}, "
             f"input_sentence_size={input_sentence_size:,}, max_sentence_length={max_sentence_length}, "
-            f"byte_fallback={args.byte_fallback}."
+            f"byte_fallback={args.byte_fallback}, code_fidelity_mode={args.code_fidelity_mode}."
         )
 
         spm.SentencePieceTrainer.train(
@@ -237,6 +288,8 @@ def main():
             eos_piece="<|eos|>",
             user_defined_symbols=["<|im_start|>", "<|im_end|>", "<think>", "</think>"],
             byte_fallback=args.byte_fallback,
+            split_by_whitespace=not args.code_fidelity_mode,
+            remove_extra_whitespaces=not args.code_fidelity_mode,
             num_threads=max(os.cpu_count() or 1, 1),
         )
     finally:

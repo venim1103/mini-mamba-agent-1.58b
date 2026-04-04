@@ -46,14 +46,26 @@ Quick start examples:
        --custom-tokenizer custom_agentic_tokenizer \
        --samples-file tests/tokenizer_samples.json
 
+6) Generic diagnostics gates (UNK/byte markers/normalized roundtrip):
+   /opt/conda/envs/ai/bin/python compare_tokenizers.py \
+       --custom-tokenizer custom_agentic_tokenizer \
+       --max-average-ratio 1.10 \
+       --max-unk-ratio 0.01 \
+       --max-byte-markers 0 \
+       --require-normalized-roundtrip \
+       --report-json /tmp/tokenizer_report_generic_checks.json
+
 Notes:
 - Ratios are custom/base token counts per sample.
 - Lower ratio is better (fewer custom tokens than base).
 - If all base token counts are zero, average ratio is unavailable.
+- Normalized roundtrip compares text after collapsing whitespace.
+- Byte markers refer to decoded literals like <0x0A>.
 """
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from statistics import mean
@@ -63,6 +75,7 @@ from transformers import AutoTokenizer
 
 DEFAULT_BASE_TOKENIZER = "deepseek-ai/deepseek-coder-1.3b-base"
 DEFAULT_CUSTOM_TOKENIZER = "custom_agentic_tokenizer"
+BYTE_MARKER_RE = re.compile(r"<0x[0-9A-Fa-f]{2}>")
 
 DEFAULT_SAMPLES = [
     {
@@ -164,6 +177,30 @@ def parse_args():
         help="Optional regression gate. Fail if any sample does not roundtrip exactly.",
     )
     parser.add_argument(
+        "--require-normalized-roundtrip",
+        action="store_true",
+        help=(
+            "Optional regression gate. Fail if any sample does not roundtrip after "
+            "collapsing whitespace differences."
+        ),
+    )
+    parser.add_argument(
+        "--max-unk-ratio",
+        type=float,
+        help=(
+            "Optional regression gate. Fail if custom unknown-token ratio for any "
+            "sample exceeds this threshold."
+        ),
+    )
+    parser.add_argument(
+        "--max-byte-markers",
+        type=int,
+        help=(
+            "Optional regression gate. Fail if decoded custom text contains more than "
+            "this many <0x..> byte-fallback markers for any sample."
+        ),
+    )
+    parser.add_argument(
         "--report-json",
         help="Optional output path for a JSON report with per-sample metrics.",
     )
@@ -224,6 +261,14 @@ def format_ratio(base_count, custom_count):
     return f"{ratio:.3f} ({(ratio - 1) * 100:.1f}% more tokens)"
 
 
+def normalize_whitespace(text):
+    return " ".join(text.split())
+
+
+def count_byte_markers(text):
+    return len(BYTE_MARKER_RE.findall(text))
+
+
 def compare_tokenizers(base_tokenizer, custom_tokenizer, samples, show_ids=False):
     ratios = []
     results = []
@@ -233,12 +278,21 @@ def compare_tokenizers(base_tokenizer, custom_tokenizer, samples, show_ids=False
     print(f"Custom: {custom_tokenizer.name_or_path}")
     print()
 
+    custom_unk_id = getattr(custom_tokenizer, "unk_token_id", None)
+
     for sample in samples:
         name = sample["name"]
         text = sample["text"]
         base_ids = base_tokenizer.encode(text, add_special_tokens=False)
         custom_ids = custom_tokenizer.encode(text, add_special_tokens=False)
-        roundtrip = custom_tokenizer.decode(custom_ids, skip_special_tokens=False) == text
+        decoded = custom_tokenizer.decode(custom_ids, skip_special_tokens=False)
+        roundtrip = decoded == text
+        normalized_roundtrip = normalize_whitespace(decoded) == normalize_whitespace(text)
+        custom_unk_count = 0
+        if custom_unk_id is not None:
+            custom_unk_count = custom_ids.count(custom_unk_id)
+        custom_unk_ratio = (custom_unk_count / len(custom_ids)) if custom_ids else 0.0
+        byte_marker_count = count_byte_markers(decoded)
 
         if base_ids:
             ratios.append(len(custom_ids) / len(base_ids))
@@ -247,7 +301,6 @@ def compare_tokenizers(base_tokenizer, custom_tokenizer, samples, show_ids=False
         if base_ids:
             ratio = len(custom_ids) / len(base_ids)
 
-        decoded = custom_tokenizer.decode(custom_ids, skip_special_tokens=False)
         results.append(
             {
                 "name": name,
@@ -256,6 +309,10 @@ def compare_tokenizers(base_tokenizer, custom_tokenizer, samples, show_ids=False
                 "custom_tokens": len(custom_ids),
                 "ratio": ratio,
                 "roundtrip_exact": roundtrip,
+                "roundtrip_normalized": normalized_roundtrip,
+                "custom_unk_count": custom_unk_count,
+                "custom_unk_ratio": custom_unk_ratio,
+                "byte_marker_count": byte_marker_count,
                 "decoded_preview": decoded[:160],
             }
         )
@@ -266,6 +323,9 @@ def compare_tokenizers(base_tokenizer, custom_tokenizer, samples, show_ids=False
         print(f"  custom:  {len(custom_ids):4d} tokens")
         print(f"  ratio:   {format_ratio(len(base_ids), len(custom_ids))}")
         print(f"  roundtrip exact: {roundtrip}")
+        print(f"  roundtrip normalized: {normalized_roundtrip}")
+        print(f"  custom unk: {custom_unk_count} ({custom_unk_ratio:.3%})")
+        print(f"  decoded byte markers: {byte_marker_count}")
         if not roundtrip:
             print(f"  decoded preview: {decoded[:160]!r}")
         if show_ids:
@@ -286,7 +346,15 @@ def compare_tokenizers(base_tokenizer, custom_tokenizer, samples, show_ids=False
     }
 
 
-def evaluate_regressions(report, max_average_ratio=None, max_sample_ratio=None, require_roundtrip=False):
+def evaluate_regressions(
+    report,
+    max_average_ratio=None,
+    max_sample_ratio=None,
+    require_roundtrip=False,
+    require_normalized_roundtrip=False,
+    max_unk_ratio=None,
+    max_byte_markers=None,
+):
     failures = []
 
     if max_average_ratio is not None:
@@ -311,6 +379,29 @@ def evaluate_regressions(report, max_average_ratio=None, max_sample_ratio=None, 
         for sample in report.get("samples", []):
             if not sample.get("roundtrip_exact", False):
                 failures.append(f"sample '{sample['name']}' failed exact roundtrip")
+
+    if require_normalized_roundtrip:
+        for sample in report.get("samples", []):
+            if not sample.get("roundtrip_normalized", False):
+                failures.append(f"sample '{sample['name']}' failed normalized roundtrip")
+
+    if max_unk_ratio is not None:
+        for sample in report.get("samples", []):
+            unk_ratio = sample.get("custom_unk_ratio")
+            if unk_ratio is not None and unk_ratio > max_unk_ratio:
+                failures.append(
+                    f"sample '{sample['name']}' custom unk ratio {unk_ratio:.3f} exceeded "
+                    f"max-unk-ratio {max_unk_ratio:.3f}"
+                )
+
+    if max_byte_markers is not None:
+        for sample in report.get("samples", []):
+            byte_markers = sample.get("byte_marker_count")
+            if byte_markers is not None and byte_markers > max_byte_markers:
+                failures.append(
+                    f"sample '{sample['name']}' byte marker count {byte_markers} exceeded "
+                    f"max-byte-markers {max_byte_markers}"
+                )
 
     return failures
 
@@ -339,6 +430,9 @@ def main():
         max_average_ratio=args.max_average_ratio,
         max_sample_ratio=args.max_sample_ratio,
         require_roundtrip=args.require_roundtrip,
+        require_normalized_roundtrip=args.require_normalized_roundtrip,
+        max_unk_ratio=args.max_unk_ratio,
+        max_byte_markers=args.max_byte_markers,
     )
     if failures:
         print("\nRegression check failed:")

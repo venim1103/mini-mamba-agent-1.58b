@@ -478,6 +478,10 @@ def _run_sentencepiece_backend():
     if max_sentence_length:
         command.extend(["--max-sentence-length", max_sentence_length])
 
+    code_fidelity_mode = os.getenv("TOKENIZER_SPM_CODE_FIDELITY")
+    if code_fidelity_mode and code_fidelity_mode.strip().lower() in {"1", "true", "yes", "on"}:
+        command.append("--code-fidelity-mode")
+
     print(
         "Tokenizer backend: SentencePiece "
         f"(selected via TOKENIZER_BACKEND={os.getenv('TOKENIZER_BACKEND', 'auto')})."

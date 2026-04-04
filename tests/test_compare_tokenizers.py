@@ -136,6 +136,18 @@ class TestFormatRatio:
         assert "1.250" in result
 
 
+class TestDiagnosticHelpers:
+    def test_normalize_whitespace(self):
+        from compare_tokenizers import normalize_whitespace
+
+        assert normalize_whitespace("a\n\t b   c") == "a b c"
+
+    def test_count_byte_markers(self):
+        from compare_tokenizers import count_byte_markers
+
+        assert count_byte_markers("x<0x0A>y<0x3C>") == 2
+
+
 class TestParseArgs:
     """Test argument parsing."""
 
@@ -183,6 +195,11 @@ class TestParseArgs:
                 "--max-sample-ratio",
                 "1.5",
                 "--require-roundtrip",
+                "--require-normalized-roundtrip",
+                "--max-unk-ratio",
+                "0.05",
+                "--max-byte-markers",
+                "3",
                 "--report-json",
                 "report.json",
                 "--exclude-sample",
@@ -196,6 +213,9 @@ class TestParseArgs:
         assert args.max_average_ratio == 1.1
         assert args.max_sample_ratio == 1.5
         assert args.require_roundtrip is True
+        assert args.require_normalized_roundtrip is True
+        assert args.max_unk_ratio == 0.05
+        assert args.max_byte_markers == 3
         assert args.report_json == "report.json"
         assert args.exclude_sample == ["python_code", "web_text,tool_calling"]
 
@@ -222,10 +242,11 @@ class TestFilterSamples:
 
 
 class _FakeTokenizer:
-    def __init__(self, name, ids_by_text, decode_map=None):
+    def __init__(self, name, ids_by_text, decode_map=None, unk_token_id=1):
         self.name_or_path = name
         self._ids_by_text = ids_by_text
         self._decode_map = decode_map or {}
+        self.unk_token_id = unk_token_id
 
     def encode(self, text, add_special_tokens=False):
         return list(self._ids_by_text.get(text, []))
@@ -263,6 +284,8 @@ class TestCompareTokenizersRun:
         assert "roundtrip exact: True" in out
         assert report["average_ratio"] is not None
         assert len(report["samples"]) == 2
+        assert "custom_unk_ratio" in report["samples"][0]
+        assert "byte_marker_count" in report["samples"][0]
 
     def test_show_ids_and_roundtrip_preview_paths(self):
         from compare_tokenizers import compare_tokenizers
@@ -310,8 +333,11 @@ class TestCompareTokenizersMain:
             max_average_ratio=None,
             max_sample_ratio=None,
             require_roundtrip=False,
+            require_normalized_roundtrip=False,
+            max_unk_ratio=None,
+            max_byte_markers=None,
             report_json=None,
-                exclude_sample=[],
+            exclude_sample=[],
         )
         sample_payload = [{"name": "s1", "text": "hello"}]
 
@@ -337,13 +363,25 @@ class TestEvaluateRegressions:
 
         report = {
             "average_ratio": 0.95,
-            "samples": [{"name": "a", "ratio": 1.1, "roundtrip_exact": True}],
+            "samples": [
+                {
+                    "name": "a",
+                    "ratio": 1.1,
+                    "roundtrip_exact": True,
+                    "roundtrip_normalized": True,
+                    "custom_unk_ratio": 0.1,
+                    "byte_marker_count": 1,
+                }
+            ],
         }
         failures = evaluate_regressions(
             report,
             max_average_ratio=1.0,
             max_sample_ratio=1.2,
             require_roundtrip=True,
+            require_normalized_roundtrip=True,
+            max_unk_ratio=0.2,
+            max_byte_markers=2,
         )
         assert failures == []
 
@@ -353,8 +391,22 @@ class TestEvaluateRegressions:
         report = {
             "average_ratio": 1.5,
             "samples": [
-                {"name": "bad_ratio", "ratio": 2.0, "roundtrip_exact": True},
-                {"name": "bad_roundtrip", "ratio": 1.0, "roundtrip_exact": False},
+                {
+                    "name": "bad_ratio",
+                    "ratio": 2.0,
+                    "roundtrip_exact": True,
+                    "roundtrip_normalized": True,
+                    "custom_unk_ratio": 0.0,
+                    "byte_marker_count": 0,
+                },
+                {
+                    "name": "bad_roundtrip",
+                    "ratio": 1.0,
+                    "roundtrip_exact": False,
+                    "roundtrip_normalized": False,
+                    "custom_unk_ratio": 0.3,
+                    "byte_marker_count": 5,
+                },
             ],
         }
         failures = evaluate_regressions(
@@ -362,7 +414,13 @@ class TestEvaluateRegressions:
             max_average_ratio=1.1,
             max_sample_ratio=1.5,
             require_roundtrip=True,
+            require_normalized_roundtrip=True,
+            max_unk_ratio=0.2,
+            max_byte_markers=2,
         )
         assert any("average ratio" in f for f in failures)
         assert any("bad_ratio" in f for f in failures)
         assert any("bad_roundtrip" in f for f in failures)
+        assert any("normalized roundtrip" in f for f in failures)
+        assert any("max-unk-ratio" in f for f in failures)
+        assert any("max-byte-markers" in f for f in failures)
