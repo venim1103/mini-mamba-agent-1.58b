@@ -171,6 +171,55 @@ class TestParseArgs:
         
         assert args.show_ids is True
 
+    def test_regression_flags(self):
+        from compare_tokenizers import parse_args
+
+        with patch(
+            "sys.argv",
+            [
+                "compare_tokenizers.py",
+                "--max-average-ratio",
+                "1.1",
+                "--max-sample-ratio",
+                "1.5",
+                "--require-roundtrip",
+                "--report-json",
+                "report.json",
+                "--exclude-sample",
+                "python_code",
+                "--exclude-sample",
+                "web_text,tool_calling",
+            ],
+        ):
+            args = parse_args()
+
+        assert args.max_average_ratio == 1.1
+        assert args.max_sample_ratio == 1.5
+        assert args.require_roundtrip is True
+        assert args.report_json == "report.json"
+        assert args.exclude_sample == ["python_code", "web_text,tool_calling"]
+
+
+class TestFilterSamples:
+    def test_returns_all_when_no_exclusions(self):
+        from compare_tokenizers import filter_samples
+
+        samples = [{"name": "a", "text": "1"}, {"name": "b", "text": "2"}]
+        assert filter_samples(samples, []) == samples
+
+    def test_excludes_repeated_and_comma_separated_names(self):
+        from compare_tokenizers import filter_samples
+
+        samples = [
+            {"name": "python_code", "text": "1"},
+            {"name": "web_text", "text": "2"},
+            {"name": "tool_calling", "text": "3"},
+            {"name": "math_reasoning", "text": "4"},
+        ]
+        filtered = filter_samples(samples, ["python_code", "web_text,tool_calling"])
+
+        assert [s["name"] for s in filtered] == ["math_reasoning"]
+
 
 class _FakeTokenizer:
     def __init__(self, name, ids_by_text, decode_map=None):
@@ -206,12 +255,14 @@ class TestCompareTokenizersRun:
 
         stream = io.StringIO()
         with redirect_stdout(stream):
-            compare_tokenizers(base, custom, samples, show_ids=False)
+            report = compare_tokenizers(base, custom, samples, show_ids=False)
 
         out = stream.getvalue()
         assert "Comparison: base tokenizer vs custom tokenizer" in out
         assert "Average custom/base ratio" in out
         assert "roundtrip exact: True" in out
+        assert report["average_ratio"] is not None
+        assert len(report["samples"]) == 2
 
     def test_show_ids_and_roundtrip_preview_paths(self):
         from compare_tokenizers import compare_tokenizers
@@ -256,6 +307,11 @@ class TestCompareTokenizersMain:
             custom_tokenizer="custom-id",
             samples_file="samples.json",
             show_ids=True,
+            max_average_ratio=None,
+            max_sample_ratio=None,
+            require_roundtrip=False,
+            report_json=None,
+                exclude_sample=[],
         )
         sample_payload = [{"name": "s1", "text": "hello"}]
 
@@ -273,3 +329,40 @@ class TestCompareTokenizersMain:
             samples=sample_payload,
             show_ids=True,
         )
+
+
+class TestEvaluateRegressions:
+    def test_no_failures_when_within_thresholds(self):
+        from compare_tokenizers import evaluate_regressions
+
+        report = {
+            "average_ratio": 0.95,
+            "samples": [{"name": "a", "ratio": 1.1, "roundtrip_exact": True}],
+        }
+        failures = evaluate_regressions(
+            report,
+            max_average_ratio=1.0,
+            max_sample_ratio=1.2,
+            require_roundtrip=True,
+        )
+        assert failures == []
+
+    def test_collects_failures(self):
+        from compare_tokenizers import evaluate_regressions
+
+        report = {
+            "average_ratio": 1.5,
+            "samples": [
+                {"name": "bad_ratio", "ratio": 2.0, "roundtrip_exact": True},
+                {"name": "bad_roundtrip", "ratio": 1.0, "roundtrip_exact": False},
+            ],
+        }
+        failures = evaluate_regressions(
+            report,
+            max_average_ratio=1.1,
+            max_sample_ratio=1.5,
+            require_roundtrip=True,
+        )
+        assert any("average ratio" in f for f in failures)
+        assert any("bad_ratio" in f for f in failures)
+        assert any("bad_roundtrip" in f for f in failures)
