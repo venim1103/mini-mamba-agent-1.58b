@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 import os
 import wandb
-from model import BitMambaLLM, chunked_cross_entropy, maybe_autocast
+from model import BitMambaLLM, maybe_autocast
 from optim import setup_mamba_optimizers
 from sft_data import SFT_STAGES, create_sft_dataloader
 from transformers import AutoTokenizer
