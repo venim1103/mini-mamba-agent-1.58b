@@ -193,7 +193,6 @@ def _export_hf_tokenizer(spm_model_path, output_dir):
             eos_token="<|eos|>",
             unk_token="<|unk|>",
             pad_token="<|pad|>",
-            additional_special_tokens=["<|im_start|>", "<|im_end|>", "<think>", "</think>"],
         )
         tokenizer.save_pretrained(output_dir)
         print(f"Saved HuggingFace tokenizer files to ./{output_dir}")
@@ -231,7 +230,6 @@ def _export_hf_tokenizer(spm_model_path, output_dir):
             eos_token="<|eos|>",
             unk_token="<|unk|>",
             pad_token="<|pad|>",
-            additional_special_tokens=["<|im_start|>", "<|im_end|>", "<think>", "</think>"],
         )
         tokenizer.save_pretrained(output_dir)
         print(f"Saved HuggingFace tokenizer files to ./{output_dir}")
