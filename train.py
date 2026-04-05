@@ -191,6 +191,10 @@ def run_training_steps(model, raw_model, optimizers, scheduler,
         accumulated_valid_tokens = 0
 
         for _ in range(GRAD_ACCUM_STEPS):
+            # Tell CUDAGraphs a new forward/backward cycle is starting.
+            # Prevents RuntimeError about overwriting static graph memory during grad accumulation.
+            torch.compiler.cudagraph_mark_step_begin()
+
             x, y, cu_seqlens, n_segs = next(data_iter)
 
             x, y = x.to(device)[:, :current_ctx], y.to(device)[:, :current_ctx]

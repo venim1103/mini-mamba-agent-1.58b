@@ -155,7 +155,9 @@ class TernaryQuantizeSTE(torch.autograd.Function):
             output = torch.empty_like(weight)
             n_elements = weight.numel()
             grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
-            _ternary_quant_kernel[grid](weight, output, n_elements, scale.item(), BLOCK_SIZE=1024)
+            # Extract to a pure Python float before the Triton launch to keep the compiler happy
+            scale_val = scale.item()
+            _ternary_quant_kernel[grid](weight, output, n_elements, scale_val, BLOCK_SIZE=1024)
             return output
         w_scaled = weight / scale
         w_quant = torch.where(w_scaled >= 0, torch.floor(w_scaled + 0.5), torch.ceil(w_scaled - 0.5))
