@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import glob
 # Set CUDA allocator config to reduce fragmentation on 16GB GPUs
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -49,7 +50,7 @@ else:
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # overridden by setup_distributed()
 BATCH_SIZE = 2             
 GRAD_ACCUM_STEPS = 8       
-SAVE_EVERY = 5000
+SAVE_EVERY = 100  # Checkpoint roughly every 3 hours on Kaggle
 
 # G10: Use FP16 + GradScaler on Ampere (RTX 3090) for 2x throughput.
 # Set to torch.bfloat16 on Ada Lovelace (RTX 4090) where BF16 == FP16 speed.
@@ -145,7 +146,7 @@ def create_seq_idx_batch(cu_seqlens_padded, n_segs, seqlen):
 
 def run_training_steps(model, raw_model, optimizers, scheduler,
                        train_loader, scaler, total_steps,
-                       checkpoint_dir, device, world_size=1):
+                       checkpoint_dir, device, world_size=1, start_step=0):
     """Inner training loop, decoupled from DDP setup, wandb init, and torch.compile.
 
     Args:
@@ -159,15 +160,20 @@ def run_training_steps(model, raw_model, optimizers, scheduler,
         checkpoint_dir: Directory to write step checkpoints into
         device:         String device identifier ('cpu' or 'cuda:N')
         world_size:     Number of distributed ranks (1 for single-GPU)
+        start_step:     Step to resume training from
     """
     muon_opt, adam_opt, mamba_core_opt = optimizers
     data_iter = iter(train_loader)
     total_tokens = 0
     t0 = time.time()
-    previous_ctx = scheduler.get_lr_and_ctx(0)[1]
-    previous_phase = "Phase_1"
+    
+    # Use read-only get_lr_and_ctx to prevent redundant state mutations on resume
+    if start_step > 0:
+        _, previous_ctx, previous_phase = scheduler.get_lr_and_ctx(start_step)
+    else:
+        previous_ctx, previous_phase = CURRICULUM_CONFIG['phases'][0]['ctx'], "Phase_1"
 
-    for step in range(total_steps):
+    for step in range(start_step, total_steps):
         current_lr, current_ctx, phase_name = scheduler.step(step)
 
         need_reload = False
@@ -242,9 +248,40 @@ def run_training_steps(model, raw_model, optimizers, scheduler,
             wandb.log({"Train/Loss": accumulated_loss, "System/Total_Tokens": total_tokens * world_size}, step=step)
 
         if step > 0 and step % SAVE_EVERY == 0 and is_main_process():
-            torch.save({'step': step, 'model_state_dict': raw_model.state_dict()}, os.path.join(checkpoint_dir, f"step_{step:06d}.pt"))
+            ckpt_path = os.path.join(checkpoint_dir, f"step_{step:06d}.pt")
+            torch.save({
+                'step': step,
+                'model_state_dict': raw_model.state_dict(),
+                'muon_opt_state': muon_opt.state_dict(),
+                'adam_opt_state': adam_opt.state_dict(),
+                'mamba_core_opt_state': mamba_core_opt.state_dict(),
+                'scaler_state': scaler.state_dict(),
+                'wandb_run_id': wandb.run.id if wandb.run else None
+            }, ckpt_path)
+            print(f"  [Save] Checkpoint written to {ckpt_path}")
         barrier()
 
+
+def load_latest_checkpoint(checkpoint_dir, raw_model, optimizers, scaler, device):
+    """Finds the most recent checkpoint, loads weights & optimizer states safely."""
+    muon_opt, adam_opt, mamba_core_opt = optimizers
+    pt_files = glob.glob(os.path.join(checkpoint_dir, "step_*.pt"))
+    if not pt_files:
+        return 0, None
+    
+    # Sort by step number extracted from filename
+    latest_ckpt = max(pt_files, key=lambda f: int(os.path.basename(f).split('_')[1].split('.')[0]))
+    print(f"Resuming training from latest checkpoint: {latest_ckpt}")
+    
+    # weights_only=False required to load Python objects in optimizer states safely
+    ckpt = torch.load(latest_ckpt, map_location=device, weights_only=False)
+    raw_model.load_state_dict(ckpt['model_state_dict'])
+    if 'muon_opt_state' in ckpt: muon_opt.load_state_dict(ckpt['muon_opt_state'])
+    if 'adam_opt_state' in ckpt: adam_opt.load_state_dict(ckpt['adam_opt_state'])
+    if 'mamba_core_opt_state' in ckpt: mamba_core_opt.load_state_dict(ckpt['mamba_core_opt_state'])
+    if 'scaler_state' in ckpt: scaler.load_state_dict(ckpt['scaler_state'])
+    
+    return ckpt['step'] + 1, ckpt.get('wandb_run_id')
 
 def main():
     global DEVICE
@@ -252,8 +289,6 @@ def main():
     DEVICE = device  # update module-level DEVICE for create_seq_idx_batch
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    if is_main_process():
-        wandb.init(project="Agentic-1.58b-Model", name=f"run-bitmamba-{MODE}", config=CURRICULUM_CONFIG)
     
     if is_main_process():
         print(f"Initializing {MODE.upper()} BitMamba Model...")
@@ -286,15 +321,36 @@ def main():
     muon_opt, adam_opt, mamba_core_opt = setup_mamba_optimizers(raw_model, CURRICULUM_CONFIG)
     scheduler = FGWSD_Scheduler(muon_opt, adam_opt, mamba_core_opt, TOTAL_STEPS, CURRICULUM_CONFIG)
     
-    # Start with Phase_1 (warmup) data config for FG-WSD
-    initial_ctx = CURRICULUM_CONFIG['phases'][0]['ctx']
-    train_loader, tokenizer = create_dataloaders(
-        TRAIN_CONFIGS["Phase_1"], tokenizer_path="custom_agentic_tokenizer", 
-        max_seq_len=initial_ctx, batch_size=BATCH_SIZE
-    )
-    model.train()
     # G10: GradScaler for FP16 (no-op when using BF16)
     scaler = torch.amp.GradScaler(enabled=(DEVICE.startswith("cuda") and AMP_DTYPE == torch.float16))
+    
+    start_step, wandb_run_id = 0, None
+    if MODE != "upscaled":
+        start_step, wandb_run_id = load_latest_checkpoint(
+            CHECKPOINT_DIR, raw_model, (muon_opt, adam_opt, mamba_core_opt), scaler, DEVICE
+        )
+
+    if is_main_process():
+        wandb.init(
+            project="Agentic-1.58b-Model",
+            name=f"run-bitmamba-{MODE}",
+            id=wandb_run_id,          # Resumes the same loss curve if id exists!
+            resume="allow",           # Crucial for preventing fragmented runs
+            config=CURRICULUM_CONFIG
+        )
+
+    # Initialize correct data phase and context based on starting step using read-only method
+    if start_step > 0:
+        _, start_ctx, start_phase = scheduler.get_lr_and_ctx(start_step)
+    else:
+        start_ctx, start_phase = CURRICULUM_CONFIG['phases'][0]['ctx'], "Phase_1"
+    
+    train_loader, tokenizer = create_dataloaders(
+        TRAIN_CONFIGS.get(start_phase, TRAIN_CONFIGS["Phase_1"]), 
+        tokenizer_path="custom_agentic_tokenizer", 
+        max_seq_len=start_ctx, batch_size=BATCH_SIZE
+    )
+    model.train()
     
     run_training_steps(
         model=model,
@@ -307,6 +363,7 @@ def main():
         checkpoint_dir=CHECKPOINT_DIR,
         device=DEVICE,
         world_size=world_size,
+        start_step=start_step
     )
 
     if is_main_process():
