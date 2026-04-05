@@ -32,19 +32,22 @@ def test_set_repo_directory_missing(monkeypatch):
 def test_load_kaggle_secrets_sets_env(monkeypatch):
     class FakeSecretsClient:
         def get_secret(self, name):
-            return {"HF_TOKEN": "hf", "WANDB_API_KEY": "wb"}[name]
+            return {"HF_TOKEN": "hf", "WANDB_API_KEY": "wb", "REPO_ID": "repo"}[name]
 
     fake_module = types.SimpleNamespace(UserSecretsClient=FakeSecretsClient)
     monkeypatch.setitem(__import__("sys").modules, "kaggle_secrets", fake_module)
 
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    monkeypatch.delenv("REPO_ID", raising=False)
 
     out = kaggle_watchdog.load_kaggle_secrets(logger=lambda _: None)
 
-    assert out == {"HF_TOKEN": "hf", "WANDB_API_KEY": "wb"}
+    assert out == {"HF_TOKEN": "hf", "WANDB_API_KEY": "wb", "REPO_ID": "repo"}
     assert kaggle_watchdog.os.environ["HF_TOKEN"] == "hf"
     assert kaggle_watchdog.os.environ["WANDB_API_KEY"] == "wb"
+    assert kaggle_watchdog.os.environ["REPO_ID"] == "repo"
+    assert kaggle_watchdog.os.environ["REPO_ID"] == "repo"
 
 
 def test_start_background_sync_launches_process(monkeypatch):
