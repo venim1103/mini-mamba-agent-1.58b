@@ -38,10 +38,14 @@ def load_kaggle_secrets(*, logger=print) -> dict[str, str]:
     user_secrets = UserSecretsClient()
     hf_token = user_secrets.get_secret("HF_TOKEN")
     wandb_api_key = user_secrets.get_secret("WANDB_API_KEY")
+    repo_id = user_secrets.get_secret("REPO_ID")
+
     os.environ["HF_TOKEN"] = hf_token
     os.environ["WANDB_API_KEY"] = wandb_api_key
-    logger("Loaded HF_TOKEN and WANDB_API_KEY from Kaggle secrets")
-    return {"HF_TOKEN": hf_token, "WANDB_API_KEY": wandb_api_key}
+    os.environ["REPO_ID"] = repo_id
+
+    logger("Loaded HF_TOKEN, WANDB_API_KEY, and REPO_ID from Kaggle secrets")
+    return {"HF_TOKEN": hf_token, "WANDB_API_KEY": wandb_api_key, "REPO_ID": repo_id}
 
 
 def start_background_sync(*, log_path: str = "sync_logs.txt"):
