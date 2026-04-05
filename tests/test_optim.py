@@ -183,7 +183,8 @@ class TestSetupMambaOptimizers:
             # Skip mamba sensitive params and embedding / norm
             if any(k in name for k in ("A_log", ".D", "dt_bias")):
                 continue
-            if "norm" in name or "tok_embeddings" in name:
+            # CRITICAL: Also skip output.weight since we explicitly route it to AdamW to prevent OOM
+            if "norm" in name or "tok_embeddings" in name or "output.weight" in name:
                 continue
             if p.ndim == 2 and "weight" in name:
                 assert id(p) in muon_param_ids, \
