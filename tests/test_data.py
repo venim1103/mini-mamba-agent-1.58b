@@ -26,6 +26,7 @@ from data import (
     AgenticDataMixture,
     get_text_column,
     create_infinite_stream,
+    extract_text_from_row,
 )
 
 
@@ -66,6 +67,34 @@ class TestGetTextColumn:
         stream = [{"number": 123}]
         with pytest.raises(ValueError):
             get_text_column(iter(stream))
+
+
+# ---------------------------------------------------------------------------
+# extract_text_from_row
+# ---------------------------------------------------------------------------
+
+class TestExtractTextFromRow:
+    def test_extracts_messages(self):
+        row = {"messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"}]}
+        result = extract_text_from_row(row)
+        assert "user: Hello" in result
+        assert "assistant: Hi" in result
+
+    def test_extracts_problem_solution(self):
+        row = {"problem": "What is 2+2?", "solution": "4"}
+        result = extract_text_from_row(row)
+        assert "Problem: What is 2+2?" in result
+        assert "Solution: 4" in result
+
+    def test_extracts_facts_proofs(self):
+        row = {"hypothesis": "A is B", "proofs": ["Step 1", "Step 2"]}
+        result = extract_text_from_row(row)
+        assert "Hypothesis: A is B" in result
+        assert "Proof: Step 1 Step 2" in result
+
+    def test_fallback_longest_string(self):
+        row = {"short": "hi", "long": "this is the longest string in the dict"}
+        assert extract_text_from_row(row) == "this is the longest string in the dict"
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +146,17 @@ def tok():
 # ---------------------------------------------------------------------------
 
 class TestPackedTokenStream:
+    def test_uses_dynamic_extractor(self, tok):
+        """Verifies packed_token_stream ignores text_column and uses extract_text_from_row."""
+        stream = iter([{"problem": "What is 2+2?", "solution": "4"}] * 10)
+        gen = packed_token_stream(stream, tok, "invalid_column", max_seq_len=20)
+        x, y, cu = next(gen)
+        # If text_column were used, this would KeyError. If extract_text_from_row ran,
+        # the output will contain tokens from "Problem:..." and "Solution:..."
+        assert x.shape == (20,)
+        assert cu[0].item() == 0
+        assert cu[-1].item() == 20
+
     def test_yields_three_tuple(self, tok):
         stream = _make_stream(["hello world"])
         gen = packed_token_stream(stream, tok, "text", max_seq_len=8)
