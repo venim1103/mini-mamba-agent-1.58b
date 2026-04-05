@@ -231,6 +231,9 @@ class TestRunTrainingStepsIntegration:
         mock_loader.__iter__ = MagicMock(side_effect=infinite_iter)
         mock_create_dl.return_value = (mock_loader, MagicMock())
 
+        # wandb.run must be None so wandb.run.id doesn't return an unpicklable MagicMock
+        mock_wandb.run = None
+
         train.run_training_steps(
             model=model,
             raw_model=model,
@@ -247,6 +250,12 @@ class TestRunTrainingStepsIntegration:
         ckpt_files = list(tmp_path.glob("*.pt"))
         assert len(ckpt_files) == 1, f"Expected 1 checkpoint, found: {ckpt_files}"
 
-        ckpt = torch.load(ckpt_files[0], map_location='cpu', weights_only=True)
+        # weights_only=False required: optimizer states contain complex Python objects
+        ckpt = torch.load(ckpt_files[0], map_location='cpu', weights_only=False)
         assert 'model_state_dict' in ckpt
         assert 'step' in ckpt
+        assert 'muon_opt_state' in ckpt
+        assert 'adam_opt_state' in ckpt
+        assert 'mamba_core_opt_state' in ckpt
+        assert 'scaler_state' in ckpt
+        assert ckpt.get('wandb_run_id') is None  # wandb.run was None, so this should be None
