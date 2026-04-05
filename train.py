@@ -272,7 +272,9 @@ def main():
     # IMPORTANT: torch.compile is compatible with gradient checkpointing ONLY when
     # use_reentrant=False (set in BitMambaLLM._backbone). Do NOT change checkpointing
     # to use_reentrant=True — it will silently corrupt gradients under compile.
-    model._backbone = torch.compile(model._backbone, mode="reduce-overhead")
+    # Note: Using mode="default" instead of "reduce-overhead" to disable CUDA Graphs,
+    # which conflict with gradient checkpointing + accumulation.
+    model._backbone = torch.compile(model._backbone, mode="default")
 
     # Wrap in DDP after compile but before optimizer creation
     model = wrap_model_ddp(model, local_rank)

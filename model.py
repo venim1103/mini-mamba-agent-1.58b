@@ -135,11 +135,13 @@ if mamba_chunk_scan_combined is None:
 # ==========================================
 if HAS_TRITON:
     @triton.jit
-    def _ternary_quant_kernel(w_ptr, output_ptr, n_elements, scale, BLOCK_SIZE: tl.constexpr):
+    def _ternary_quant_kernel(w_ptr, output_ptr, n_elements, scale_ptr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(axis=0)
         offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_elements
         w = tl.load(w_ptr + offsets, mask=mask).to(tl.float32)
+        # Load scalar scale from tensor pointer to avoid CPU sync
+        scale = tl.load(scale_ptr).to(tl.float32)
         w_scaled = w / scale
         # Triton does not expose tl.math.round on all versions; emulate nearest-int rounding.
         w_quant = tl.where(w_scaled >= 0, tl.floor(w_scaled + 0.5), tl.ceil(w_scaled - 0.5))
@@ -155,9 +157,8 @@ class TernaryQuantizeSTE(torch.autograd.Function):
             output = torch.empty_like(weight)
             n_elements = weight.numel()
             grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
-            # Extract to a pure Python float before the Triton launch to keep the compiler happy
-            scale_val = scale.item()
-            _ternary_quant_kernel[grid](weight, output, n_elements, scale_val, BLOCK_SIZE=1024)
+            # Pass the scale tensor directly as a pointer! No .item() CPU sync means no graph breaks!
+            _ternary_quant_kernel[grid](weight, output, n_elements, scale, BLOCK_SIZE=1024)
             return output
         w_scaled = weight / scale
         w_quant = torch.where(w_scaled >= 0, torch.floor(w_scaled + 0.5), torch.ceil(w_scaled - 0.5))
