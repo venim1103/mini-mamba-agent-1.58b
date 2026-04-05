@@ -31,13 +31,47 @@ def create_infinite_stream(hf_dataset):
     while True:
         for item in hf_dataset: yield item
 
+def extract_text_from_row(row):
+    """Dynamically parses complex schemas into a clean training string."""
+    parts = []
+    if 'messages' in row and isinstance(row['messages'], list):
+        for msg in row['messages']:
+            if isinstance(msg, dict) and 'content' in msg:
+                parts.append(f"{msg.get('role', 'user')}: {msg['content']}")
+    
+    for key in ['problem', 'question', 'prompt', 'facts', 'hypothesis']:
+        if key in row and isinstance(row[key], str):
+            parts.append(f"{key.capitalize()}: {row[key]}")
+            
+    if 'proofs' in row and isinstance(row['proofs'], list):
+        parts.append(f"Proof: {' '.join(row['proofs'])}")
+        
+    for key in ['solution', 'answer', 'response']:
+        if key in row and isinstance(row[key], str):
+            parts.append(f"{key.capitalize()}: {row[key]}")
+            
+    for key in ['text', 'content', 'trajectory']:
+        if key in row and isinstance(row[key], str) and not parts:
+            parts.append(row[key])
+            
+    if parts:
+        return "\n".join(parts)
+        
+    # Absolute fallback
+    best_val = ""
+    for val in row.values():
+        if isinstance(val, str) and len(val) > len(best_val):
+            best_val = val
+    return best_val
+
 def packed_token_stream(dataset_stream, tokenizer, text_column, max_seq_len):
     buffer = []
     doc_lengths = []
     
     for row in dataset_stream:
-        text = row[text_column]
-        if 'answer' in row: text += "\nAnswer: " + row['answer']
+        # Dynamically extract all available text to handle complex schemas
+        text = extract_text_from_row(row)
+        if not text: continue
         
         tokens = tokenizer(text, add_special_tokens=False)["input_ids"] + [tokenizer.eos_token_id]
         buffer.extend(tokens)
@@ -118,14 +152,37 @@ def create_dataloaders(datasets_config, tokenizer_path="custom_agentic_tokenizer
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     packed_streams, weights = {}, []
     
+    # Flatten config to handle subdirectories individually and prevent mixed schema CastErrors
+    flat_config = []
     for config in datasets_config:
+        name, target_path, fmt, weight = config["name"], config["path"], config["format"], config["weight"]
+        if os.path.isdir(target_path):
+            # Only include subdirectories that actually contain files of the target format
+            subdirs = [
+                d for d in os.listdir(target_path) 
+                if os.path.isdir(os.path.join(target_path, d)) 
+                and any(f.endswith(f'.{fmt}') for _, _, files in os.walk(os.path.join(target_path, d)) for f in files)
+            ]
+            if subdirs:
+                sub_weight = weight / len(subdirs)
+                for d in subdirs:
+                    flat_config.append({
+                        "name": f"{name}_{d}",
+                        "path": os.path.join(target_path, d),
+                        "format": fmt,
+                        "weight": sub_weight
+                    })
+                continue
+        flat_config.append(config)
+            
+    for config in flat_config:
         name, target_path, fmt, weight = config["name"], config["path"], config["format"], config["weight"]
         data_files = os.path.join(target_path, f"**/*.{fmt}") if os.path.isdir(target_path) else target_path
         
         raw_dataset = load_dataset(fmt, data_files=data_files, split='train', streaming=True)
-        text_column = get_text_column(raw_dataset)
         infinite_raw_stream = create_infinite_stream(raw_dataset)
-        packed_streams[name] = iter(packed_token_stream(infinite_raw_stream, tokenizer, text_column, max_seq_len))
+        # Pass None for text_column since packed_token_stream now uses extract_text_from_row
+        packed_streams[name] = iter(packed_token_stream(infinite_raw_stream, tokenizer, None, max_seq_len))
         weights.append(weight)
 
     mixture_dataset = AgenticDataMixture(packed_streams, weights)
