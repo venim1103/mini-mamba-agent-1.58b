@@ -47,7 +47,6 @@ def test_load_kaggle_secrets_sets_env(monkeypatch):
     assert kaggle_watchdog.os.environ["HF_TOKEN"] == "hf"
     assert kaggle_watchdog.os.environ["WANDB_API_KEY"] == "wb"
     assert kaggle_watchdog.os.environ["REPO_ID"] == "repo"
-    assert kaggle_watchdog.os.environ["REPO_ID"] == "repo"
 
 
 def test_start_background_sync_launches_process(monkeypatch):
