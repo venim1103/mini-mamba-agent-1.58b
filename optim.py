@@ -70,8 +70,17 @@ class Muon(torch.optim.Optimizer):
                 buf = state['momentum_buffer']
                 buf.mul_(momentum).add_(g)
                 
-                a, b, c = (3.4445, -4.7750, 2.0315)
                 X = buf / (buf.norm(keepdim=True) + 1e-8)  # New tensor, buf stays intact (G4)
+                
+                # --- SAFETY GUARD ---
+                # If the matrix is massively wide (e.g., rows > 4096), fallback to normalized 
+                # momentum SGD. This prevents catastrophic OOM if a large layer slips through.
+                if X.size(0) > 4096:
+                    p.data.add_(X.type_as(p.data), alpha=-lr)
+                    continue
+                # --------------------
+                
+                a, b, c = (3.4445, -4.7750, 2.0315)
                 workspace = self._get_ns_workspace(self.ns_workspaces, X.shape, X.device, X.dtype)
                 A = workspace['a']
                 AA = workspace['aa']
@@ -96,7 +105,8 @@ def setup_mamba_optimizers(model, config, use_8bit=True):
         if any(key in name for key in ['A_log', 'D', 'dt_bias', 'dt_proj']):
             mamba_sensitive_params.append(p)
         # Muon handles the 2D BitLinear weights (ndim == 2 excludes 3D conv1d weights)
-        elif p.ndim == 2 and 'weight' in name and 'norm' not in name and 'tok_embeddings' not in name:
+        # CRITICAL: Explicitly exclude 'output.weight' to prevent massive 15GB workspace allocations
+        elif p.ndim == 2 and 'weight' in name and 'norm' not in name and 'tok_embeddings' not in name and 'output.weight' not in name:
             muon_params.append(p)
         # AdamW handles biases, norms, and embeddings
         else:

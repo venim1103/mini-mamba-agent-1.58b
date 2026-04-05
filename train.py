@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+# Set CUDA allocator config to reduce fragmentation on 16GB GPUs
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import torch
 import torch.nn.functional as F
-import os
 import time
 import wandb
 from model import BitMambaLLM, maybe_autocast
