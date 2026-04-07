@@ -52,19 +52,51 @@ def start_background_sync(*, log_path: str = "sync_logs.txt"):
     """Start background sync script and redirect output to a log file."""
     logger_msg = "Starting background sync watchdog..."
     print(logger_msg)
-    with open(log_path, "w") as log_file:
+    child_env = os.environ.copy()
+    # Force immediate line flushing so Kaggle log files are populated in real time.
+    child_env["PYTHONUNBUFFERED"] = "1"
+    with open(log_path, "a", buffering=1) as log_file:
+        log_file.write("[watchdog] launching background_sync.py\n")
+        log_file.flush()
         return subprocess.Popen(
-            ["python", "background_sync.py"],
+            ["python", "-u", "background_sync.py"],
             stdout=log_file,
             stderr=subprocess.STDOUT,
+            env=child_env,
+            start_new_session=True,
         )
+
+
+def run_sync_self_check(*, log_path: str = "sync_logs.txt") -> int:
+    """Run one-shot uploader diagnostics before launching the long-running sync loop."""
+    print("Running background sync self-check...")
+    child_env = os.environ.copy()
+    child_env["PYTHONUNBUFFERED"] = "1"
+    with open(log_path, "a", buffering=1) as log_file:
+        log_file.write("[watchdog] running background_sync.py --self-check\n")
+        log_file.flush()
+        result = subprocess.run(
+            ["python", "-u", "background_sync.py", "--self-check"],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            env=child_env,
+            check=False,
+        )
+    print(f"Background sync self-check exit code: {result.returncode}")
+    return result.returncode
 
 
 def main():
     if not set_repo_directory(REPO_DIR):
         return 1
     load_kaggle_secrets()
-    start_background_sync(log_path="sync_logs.txt")
+    check_code = run_sync_self_check(log_path="sync_logs.txt")
+    if check_code != 0:
+        print("Background sync self-check failed. See sync_logs.txt for details.")
+        return 2
+    proc = start_background_sync(log_path="sync_logs.txt")
+    pid = getattr(proc, "pid", "unknown")
+    print(f"Background sync started with PID {pid}. Tail sync_logs.txt to monitor.")
     return 0
 
 

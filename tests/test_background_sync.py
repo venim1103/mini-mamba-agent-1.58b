@@ -92,7 +92,7 @@ def test_sync_once_counts_successes(monkeypatch):
 
 
 def test_main_requires_repo_id(monkeypatch):
-    monkeypatch.setattr(background_sync, "REPO_ID", None)
+    monkeypatch.delenv("REPO_ID", raising=False)
 
     with pytest.raises(ValueError, match="REPO_ID"):
         background_sync.main()
@@ -100,16 +100,17 @@ def test_main_requires_repo_id(monkeypatch):
 
 def test_main_initializes_api_and_runs_loop(monkeypatch):
     fake_api = MagicMock()
-    monkeypatch.setattr(background_sync, "REPO_ID", "org/repo")
-    monkeypatch.setattr(background_sync, "HF_TOKEN", "token")
+    monkeypatch.setenv("REPO_ID", "org/repo")
+    monkeypatch.setenv("HF_TOKEN", "token")
     monkeypatch.setattr(background_sync, "HfApi", MagicMock(return_value=fake_api))
 
     called = {}
 
-    def fake_run_sync_loop(api, repo_id, checkpoint_dir):
+    def fake_run_sync_loop(api, repo_id, checkpoint_dir, logger):
         called["api"] = api
         called["repo_id"] = repo_id
         called["checkpoint_dir"] = checkpoint_dir
+        called["logger"] = logger
 
     monkeypatch.setattr(background_sync, "run_sync_loop", fake_run_sync_loop)
 
@@ -120,4 +121,61 @@ def test_main_initializes_api_and_runs_loop(monkeypatch):
         "api": fake_api,
         "repo_id": "org/repo",
         "checkpoint_dir": background_sync.CHECKPOINT_DIR,
+        "logger": background_sync._log,
     }
+
+
+def test_main_self_check_mode_success(monkeypatch):
+    fake_api = MagicMock()
+    monkeypatch.setenv("REPO_ID", "org/repo")
+    monkeypatch.setenv("HF_TOKEN", "token")
+    monkeypatch.setattr(background_sync, "HfApi", MagicMock(return_value=fake_api))
+    monkeypatch.setattr(background_sync, "run_self_check", MagicMock(return_value=True))
+
+    code = background_sync.main(["--self-check"])
+
+    assert code == 0
+    background_sync.run_self_check.assert_called_once_with(
+        fake_api, "org/repo", background_sync.CHECKPOINT_DIR, logger=background_sync._log
+    )
+
+
+def test_main_self_check_mode_failure(monkeypatch):
+    fake_api = MagicMock()
+    monkeypatch.setenv("REPO_ID", "org/repo")
+    monkeypatch.setenv("HF_TOKEN", "token")
+    monkeypatch.setattr(background_sync, "HfApi", MagicMock(return_value=fake_api))
+    monkeypatch.setattr(background_sync, "run_self_check", MagicMock(return_value=False))
+
+    code = background_sync.main(["--self-check"])
+
+    assert code == 2
+
+
+def test_run_self_check_repo_create_failure_but_repo_info_ok(monkeypatch):
+    api = MagicMock()
+    api.whoami.return_value = {"name": "user"}
+    api.create_repo.side_effect = RuntimeError("already exists")
+    api.repo_info.return_value = {"id": "org/repo"}
+    logs = []
+
+    ok = background_sync.run_self_check(api, "org/repo", "missing_dir", logger=logs.append)
+
+    assert ok is True
+    api.repo_info.assert_called_once_with(repo_id="org/repo", repo_type="model")
+    assert any("Repo access confirmed via repo_info" in msg for msg in logs)
+
+
+def test_run_self_check_repo_access_failure_returns_false():
+    api = MagicMock()
+    api.whoami.return_value = {"name": "user"}
+    api.create_repo.side_effect = RuntimeError("forbidden")
+    api.repo_info.side_effect = RuntimeError("403")
+    logs = []
+
+    ok = background_sync.run_self_check(api, "org/repo", "missing_dir", logger=logs.append)
+
+    assert ok is False
+    assert any("Repo access failed" in msg for msg in logs)
+
+

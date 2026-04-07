@@ -14,14 +14,17 @@
 
 import os
 import time
+import argparse
 from huggingface_hub import HfApi
 
-HF_TOKEN = os.environ.get("HF_TOKEN")
-# =================================================================
-# CHANGE THIS TO YOUR HUGGING FACE USERNAME/REPO
-REPO_ID = os.environ.get("REPO_ID")
-# =================================================================
 CHECKPOINT_DIR = "checkpoints"
+
+
+def _log(message: str):
+    """Emit timestamped log lines with immediate flush for notebook log files."""
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {message}", flush=True)
+
 
 def iter_new_checkpoint_files(checkpoint_dir: str, uploaded_files: set[str]):
     """Yield unseen .pt checkpoint file paths under checkpoint_dir."""
@@ -104,29 +107,100 @@ def run_sync_loop(
     uploaded_files: set[str] = set()
     logger(f"Watching {checkpoint_dir}/ for new .pt files...")
     while True:
-        sync_once(
-            api,
-            repo_id,
-            checkpoint_dir,
-            uploaded_files,
-            sleep_before_upload=sleep_before_upload,
-            sleep_fn=sleep_fn,
-            logger=logger,
-        )
+        try:
+            uploaded_count = sync_once(
+                api,
+                repo_id,
+                checkpoint_dir,
+                uploaded_files,
+                sleep_before_upload=sleep_before_upload,
+                sleep_fn=sleep_fn,
+                logger=logger,
+            )
+            logger(
+                f"Sync cycle complete: uploaded={uploaded_count}, tracked_total={len(uploaded_files)}"
+            )
+        except Exception as exc:
+            logger(f"Sync cycle failed: {exc}")
         sleep_fn(poll_interval)
 
 
-def main():
-    if not REPO_ID:
-        raise ValueError("REPO_ID environment variable is required")
-    api = HfApi(token=HF_TOKEN)
+def run_self_check(api: HfApi, repo_id: str, checkpoint_dir: str = CHECKPOINT_DIR, *, logger=print) -> bool:
+    """Run a one-shot diagnostics check for auth/repo access and checkpoint discovery."""
+    logger("Running sync self-check...")
     try:
-        api.create_repo(REPO_ID, repo_type="model", private=True)
-    except Exception:
+        who = api.whoami()
+        user_name = who.get("name") if isinstance(who, dict) else str(who)
+        logger(f"HF auth OK (user={user_name})")
+    except Exception as exc:
+        logger(f"HF auth failed: {exc}")
+        return False
+
+    try:
+        api.create_repo(repo_id, repo_type="model", private=True)
+        logger(f"Repo access OK: {repo_id}")
+    except Exception as exc:
+        # If create fails (e.g. already exists), explicitly verify we can access it.
+        logger(f"Repo create/check returned: {exc}")
+        try:
+            api.repo_info(repo_id=repo_id, repo_type="model")
+            logger(f"Repo access confirmed via repo_info: {repo_id}")
+        except Exception as repo_exc:
+            logger(f"Repo access failed: {repo_exc}")
+            return False
+
+    if not os.path.exists(checkpoint_dir):
+        logger(f"Checkpoint directory missing: {checkpoint_dir}")
+        return True
+
+    pt_files = []
+    for root, _, files in os.walk(checkpoint_dir):
+        for file in files:
+            if file.endswith(".pt"):
+                pt_files.append(os.path.join(root, file))
+
+    logger(f"Checkpoint scan OK: found {len(pt_files)} .pt file(s) under {checkpoint_dir}")
+    if pt_files:
+        logger(f"Newest candidate: {max(pt_files, key=os.path.getmtime)}")
+    return True
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Background checkpoint uploader")
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Run one-time diagnostics (auth/repo/checkpoint scan) and exit",
+    )
+    args = parser.parse_args(argv if argv is not None else [])
+
+    hf_token = os.environ.get("HF_TOKEN")
+    repo_id = os.environ.get("REPO_ID")
+
+    if not repo_id:
+        raise ValueError("REPO_ID environment variable is required")
+
+    _log("Starting background checkpoint sync")
+    _log(f"Python PID={os.getpid()}")
+    _log(f"HF token present={bool(hf_token)} | repo_id={repo_id}")
+
+    api = HfApi(token=hf_token)
+
+    if args.self_check:
+        ok = run_self_check(api, repo_id, CHECKPOINT_DIR, logger=_log)
+        _log(f"Self-check {'passed' if ok else 'failed'}")
+        return 0 if ok else 2
+
+    try:
+        api.create_repo(repo_id, repo_type="model", private=True)
+        _log("Ensured Hugging Face repo exists")
+    except Exception as exc:
         # Repository may already exist; keep syncing in either case.
-        pass
-    run_sync_loop(api, REPO_ID, CHECKPOINT_DIR)
+        _log(f"create_repo skipped/failed (continuing): {exc}")
+    run_sync_loop(api, repo_id, CHECKPOINT_DIR, logger=_log)
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    raise SystemExit(main(sys.argv[1:]))

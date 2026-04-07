@@ -53,14 +53,32 @@ def test_start_background_sync_launches_process(monkeypatch):
     popen = MagicMock(return_value="proc")
     monkeypatch.setattr(kaggle_watchdog.subprocess, "Popen", popen)
     monkeypatch.setattr("builtins.open", mock_open())
+    monkeypatch.setenv("HF_TOKEN", "hf")
 
     proc = kaggle_watchdog.start_background_sync(log_path="sync_logs.txt")
 
     assert proc == "proc"
     popen.assert_called_once()
     args, kwargs = popen.call_args
-    assert args[0] == ["python", "background_sync.py"]
+    assert args[0] == ["python", "-u", "background_sync.py"]
     assert kwargs["stderr"] == kaggle_watchdog.subprocess.STDOUT
+    assert kwargs["start_new_session"] is True
+    assert kwargs["env"]["PYTHONUNBUFFERED"] == "1"
+
+
+def test_run_sync_self_check_runs_subprocess(monkeypatch):
+    run = MagicMock(return_value=types.SimpleNamespace(returncode=0))
+    monkeypatch.setattr(kaggle_watchdog.subprocess, "run", run)
+    monkeypatch.setattr("builtins.open", mock_open())
+
+    code = kaggle_watchdog.run_sync_self_check(log_path="sync_logs.txt")
+
+    assert code == 0
+    run.assert_called_once()
+    args, kwargs = run.call_args
+    assert args[0] == ["python", "-u", "background_sync.py", "--self-check"]
+    assert kwargs["stderr"] == kaggle_watchdog.subprocess.STDOUT
+    assert kwargs["check"] is False
 
 
 def test_main_returns_1_when_repo_missing(monkeypatch):
@@ -70,7 +88,7 @@ def test_main_returns_1_when_repo_missing(monkeypatch):
 
 
 def test_main_happy_path(monkeypatch):
-    calls = {"secrets": 0, "start": 0}
+    calls = {"secrets": 0, "check": 0, "start": 0}
     monkeypatch.setattr(kaggle_watchdog, "set_repo_directory", lambda _repo_dir: True)
     monkeypatch.setattr(
         kaggle_watchdog,
@@ -79,9 +97,22 @@ def test_main_happy_path(monkeypatch):
     )
     monkeypatch.setattr(
         kaggle_watchdog,
+        "run_sync_self_check",
+        lambda log_path: calls.__setitem__("check", calls["check"] + 1) or 0,
+    )
+    monkeypatch.setattr(
+        kaggle_watchdog,
         "start_background_sync",
         lambda log_path: calls.__setitem__("start", calls["start"] + 1),
     )
 
     assert kaggle_watchdog.main() == 0
-    assert calls == {"secrets": 1, "start": 1}
+    assert calls == {"secrets": 1, "check": 1, "start": 1}
+
+
+def test_main_returns_2_when_self_check_fails(monkeypatch):
+    monkeypatch.setattr(kaggle_watchdog, "set_repo_directory", lambda _repo_dir: True)
+    monkeypatch.setattr(kaggle_watchdog, "load_kaggle_secrets", lambda: None)
+    monkeypatch.setattr(kaggle_watchdog, "run_sync_self_check", lambda log_path: 2)
+
+    assert kaggle_watchdog.main() == 2
