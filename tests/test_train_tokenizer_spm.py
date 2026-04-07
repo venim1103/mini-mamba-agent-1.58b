@@ -31,6 +31,31 @@ class TestResolveProfile:
             assert spm_mod._resolve_profile(None) == "standard"
 
 
+class TestAutoTuneInputSentenceSize:
+    def test_non_kaggle_profile_unchanged(self):
+        with mock.patch.dict(os.environ, {"TOKENIZER_MAX_RAM_GB": "30"}, clear=True):
+            assert spm_mod._auto_tune_input_sentence_size("standard", 750_000) == 750_000
+
+    def test_no_env_keeps_default(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            assert spm_mod._auto_tune_input_sentence_size("kaggle", 500_000) == 500_000
+
+    def test_30gb_kaggle_scales_up(self):
+        with mock.patch.dict(os.environ, {"TOKENIZER_MAX_RAM_GB": "30"}, clear=True):
+            assert spm_mod._auto_tune_input_sentence_size("kaggle", 500_000) == 2_800_000
+
+    def test_override_auto_tune_cap(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "TOKENIZER_MAX_RAM_GB": "30",
+                "TOKENIZER_SPM_AUTO_MAX_INPUT_SENTENCE_SIZE": "3200000",
+            },
+            clear=True,
+        ):
+            assert spm_mod._auto_tune_input_sentence_size("kaggle", 500_000) == 3_200_000
+
+
 # ---------------------------------------------------------------------------
 # _infer_domain
 # ---------------------------------------------------------------------------

@@ -31,6 +31,50 @@ def _resolve_profile(explicit_profile):
     return "standard"
 
 
+def _auto_tune_input_sentence_size(profile, input_sentence_size):
+    """Scale SPM sampling upward on higher-RAM machines when using kaggle profile.
+
+    This keeps the kaggle defaults safe for low-RAM environments while making
+    better use of local machines that intentionally run with kaggle settings.
+    """
+    if profile != "kaggle":
+        return input_sentence_size
+
+    raw_ram = os.getenv("TOKENIZER_MAX_RAM_GB")
+    if not raw_ram:
+        return input_sentence_size
+
+    try:
+        ram_gb = float(raw_ram)
+    except ValueError:
+        return input_sentence_size
+
+    base = SPM_PROFILE_DEFAULTS["kaggle"]["input_sentence_size"]
+    if ram_gb <= 13:
+        return input_sentence_size
+
+    # Linear scale from 13 GB -> 30 GB, capped for OOM safety.
+    # With current settings, 30 GB machines were underutilized (~11 GB peak),
+    # so this default cap is intentionally more aggressive.
+    target_cap = 2_800_000
+    raw_cap = os.getenv("TOKENIZER_SPM_AUTO_MAX_INPUT_SENTENCE_SIZE")
+    if raw_cap:
+        try:
+            target_cap = max(base, int(raw_cap))
+        except ValueError:
+            pass
+
+    scaled = int(base + (ram_gb - 13.0) * (target_cap - base) / (30.0 - 13.0))
+    tuned = max(base, min(target_cap, scaled))
+
+    if tuned != input_sentence_size:
+        print(
+            "Auto-tuning input_sentence_size for kaggle profile based on "
+            f"TOKENIZER_MAX_RAM_GB={ram_gb:g}: {input_sentence_size:,} -> {tuned:,}"
+        )
+    return tuned
+
+
 SPM_PROFILE_DEFAULTS = {
     "standard": {
         "input_sentence_size": 750_000,
@@ -245,6 +289,9 @@ def main():
 
     input_sentence_size = args.input_sentence_size if args.input_sentence_size is not None else defaults["input_sentence_size"]
     max_sentence_length = args.max_sentence_length if args.max_sentence_length is not None else defaults["max_sentence_length"]
+
+    if args.input_sentence_size is None:
+        input_sentence_size = _auto_tune_input_sentence_size(profile, input_sentence_size)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
