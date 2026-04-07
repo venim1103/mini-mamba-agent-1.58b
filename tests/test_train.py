@@ -258,4 +258,5 @@ class TestRunTrainingStepsIntegration:
         assert 'adam_opt_state' in ckpt
         assert 'mamba_core_opt_state' in ckpt
         assert 'scaler_state' in ckpt
+        assert 'total_tokens' in ckpt
         assert ckpt.get('wandb_run_id') is None  # wandb.run was None, so this should be None

@@ -146,7 +146,8 @@ def create_seq_idx_batch(cu_seqlens_padded, n_segs, seqlen):
 
 def run_training_steps(model, raw_model, optimizers, scheduler,
                        train_loader, scaler, total_steps,
-                       checkpoint_dir, device, world_size=1, start_step=0):
+                       checkpoint_dir, device, world_size=1, start_step=0,
+                       start_total_tokens=0):
     """Inner training loop, decoupled from DDP setup, wandb init, and torch.compile.
 
     Args:
@@ -161,10 +162,11 @@ def run_training_steps(model, raw_model, optimizers, scheduler,
         device:         String device identifier ('cpu' or 'cuda:N')
         world_size:     Number of distributed ranks (1 for single-GPU)
         start_step:     Step to resume training from
+        start_total_tokens: Token counter value to resume from
     """
     muon_opt, adam_opt, mamba_core_opt = optimizers
     data_iter = iter(train_loader)
-    total_tokens = 0
+    total_tokens = start_total_tokens
     t0 = time.time()
     
     # Use read-only get_lr_and_ctx to prevent redundant state mutations on resume
@@ -251,6 +253,7 @@ def run_training_steps(model, raw_model, optimizers, scheduler,
             ckpt_path = os.path.join(checkpoint_dir, f"step_{step:06d}.pt")
             torch.save({
                 'step': step,
+                'total_tokens': total_tokens,
                 'model_state_dict': raw_model.state_dict(),
                 'muon_opt_state': muon_opt.state_dict(),
                 'adam_opt_state': adam_opt.state_dict(),
@@ -267,7 +270,7 @@ def load_latest_checkpoint(checkpoint_dir, raw_model, optimizers, scaler, device
     muon_opt, adam_opt, mamba_core_opt = optimizers
     pt_files = glob.glob(os.path.join(checkpoint_dir, "step_*.pt"))
     if not pt_files:
-        return 0, None
+        return 0, None, 0
     
     # Sort by step number extracted from filename
     latest_ckpt = max(pt_files, key=lambda f: int(os.path.basename(f).split('_')[1].split('.')[0]))
@@ -280,8 +283,10 @@ def load_latest_checkpoint(checkpoint_dir, raw_model, optimizers, scaler, device
     if 'adam_opt_state' in ckpt: adam_opt.load_state_dict(ckpt['adam_opt_state'])
     if 'mamba_core_opt_state' in ckpt: mamba_core_opt.load_state_dict(ckpt['mamba_core_opt_state'])
     if 'scaler_state' in ckpt: scaler.load_state_dict(ckpt['scaler_state'])
-    
-    return ckpt['step'] + 1, ckpt.get('wandb_run_id')
+
+    # Backward compatible with older checkpoints that did not persist this field.
+    total_tokens = int(ckpt.get('total_tokens', 0))
+    return ckpt['step'] + 1, ckpt.get('wandb_run_id'), total_tokens
 
 def main():
     global DEVICE
@@ -324,9 +329,9 @@ def main():
     # G10: GradScaler for FP16 (no-op when using BF16)
     scaler = torch.amp.GradScaler(enabled=(DEVICE.startswith("cuda") and AMP_DTYPE == torch.float16))
     
-    start_step, wandb_run_id = 0, None
+    start_step, wandb_run_id, start_total_tokens = 0, None, 0
     if MODE != "upscaled":
-        start_step, wandb_run_id = load_latest_checkpoint(
+        start_step, wandb_run_id, start_total_tokens = load_latest_checkpoint(
             CHECKPOINT_DIR, raw_model, (muon_opt, adam_opt, mamba_core_opt), scaler, DEVICE
         )
 
@@ -363,7 +368,8 @@ def main():
         checkpoint_dir=CHECKPOINT_DIR,
         device=DEVICE,
         world_size=world_size,
-        start_step=start_step
+        start_step=start_step,
+        start_total_tokens=start_total_tokens,
     )
 
     if is_main_process():
