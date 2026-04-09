@@ -248,6 +248,32 @@ python train_tokenizer_spm.py --profile kaggle --model-type unigram --vocab-size
 
 This path builds a domain-balanced sampled corpus, trains SentencePiece with bounded `input_sentence_size`, and exports HuggingFace tokenizer files into `custom_agentic_tokenizer_spm/`.
 
+Quota design is now explicit and tunable:
+- `quota_total_lines` sets the total sampled lines.
+- `domain_weights` (or `--quota-weights`) define mix ratios per domain and are normalized automatically.
+- `--quota-overrides` lets you pin absolute per-domain counts after weight-based allocation.
+
+Examples:
+
+```bash
+# Default profile behavior (auto standard/kaggle)
+python train_tokenizer_spm.py
+
+# Tune quota mix by weights (must include logic,code,tools,web,other)
+python train_tokenizer_spm.py \
+  --quota-total-lines 1800000 \
+  --quota-weights logic=0.18,code=0.34,tools=0.12,web=0.30,other=0.06
+
+# Pin critical domains with absolute overrides
+python train_tokenizer_spm.py \
+  --quota-total-lines 1200000 \
+  --quota-weights logic=0.2,code=0.35,tools=0.1,web=0.3,other=0.05 \
+  --quota-overrides code=500000,web=420000
+
+# Load extra custom profiles from JSON
+python train_tokenizer_spm.py --profile-file tokenizer_profiles.json --profile high_code
+```
+
 ### 3. Launch Phase 1 (Pre-Training)
 
 Log in to Weights & Biases (`wandb login`), then choose a mode via env var (`scout`, `parent`, `upscaled`):

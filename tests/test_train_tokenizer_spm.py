@@ -17,18 +17,37 @@ import train_tokenizer_spm as spm_mod
 
 class TestResolveProfile:
     def test_explicit_kaggle(self):
-        assert spm_mod._resolve_profile("kaggle") == "kaggle"
+        assert spm_mod._resolve_profile("kaggle", {"standard": {}, "kaggle": {}}) == "kaggle"
 
     def test_explicit_standard(self):
-        assert spm_mod._resolve_profile("standard") == "standard"
+        assert spm_mod._resolve_profile("standard", {"standard": {}, "kaggle": {}}) == "standard"
 
     def test_env_var_triggers_kaggle(self):
         with mock.patch.dict(os.environ, {"KAGGLE_KERNEL_RUN_TYPE": "batch"}):
-            assert spm_mod._resolve_profile(None) == "kaggle"
+            assert spm_mod._resolve_profile(None, {"standard": {}, "kaggle": {}}) == "kaggle"
 
     def test_no_env_var_returns_standard(self):
         with mock.patch.dict(os.environ, {}, clear=True):
-            assert spm_mod._resolve_profile(None) == "standard"
+            assert spm_mod._resolve_profile(None, {"standard": {}, "kaggle": {}}) == "standard"
+
+    def test_unknown_profile_raises(self):
+        with pytest.raises(ValueError, match="Unknown profile"):
+            spm_mod._resolve_profile("nope", {"standard": {}, "kaggle": {}})
+
+
+class TestQuotaDesignHelpers:
+    def test_normalize_domain_weights(self):
+        normalized = spm_mod._normalize_domain_weights(
+            {"logic": 2, "code": 3, "tools": 1, "web": 3, "other": 1}
+        )
+        assert pytest.approx(sum(normalized.values())) == 1.0
+        assert normalized["code"] > normalized["tools"]
+
+    def test_calculate_domain_quotas_matches_total(self):
+        normalized = {"logic": 0.2, "code": 0.3, "tools": 0.1, "web": 0.35, "other": 0.05}
+        quotas = spm_mod._calculate_domain_quotas(1_000, normalized)
+        assert sum(quotas.values()) == 1_000
+        assert quotas["web"] >= quotas["logic"] >= quotas["other"]
 
 
 class TestAutoTuneInputSentenceSize:
@@ -109,6 +128,10 @@ class TestParseArgs:
         assert args.profile is None
         assert args.input_sentence_size is None
         assert args.max_sentence_length is None
+        assert args.profile_file is None
+        assert args.quota_total_lines is None
+        assert args.quota_weights is None
+        assert args.quota_overrides is None
         assert args.code_fidelity_mode is False
 
     def test_explicit_args(self):
@@ -121,6 +144,9 @@ class TestParseArgs:
             "--output-dir", "/tmp/out",
             "--input-sentence-size", "500000",
             "--max-sentence-length", "1024",
+            "--quota-total-lines", "12345",
+            "--quota-weights", "code=0.5,web=0.3,logic=0.1,tools=0.07,other=0.03",
+            "--quota-overrides", "code=9999",
             "--code-fidelity-mode",
         ]
         with mock.patch.object(sys, "argv", argv):
@@ -132,6 +158,9 @@ class TestParseArgs:
         assert args.output_dir == "/tmp/out"
         assert args.input_sentence_size == 500_000
         assert args.max_sentence_length == 1024
+        assert args.quota_total_lines == 12_345
+        assert args.quota_weights.startswith("code=0.5")
+        assert args.quota_overrides == "code=9999"
         assert args.code_fidelity_mode is True
 
 
@@ -145,29 +174,20 @@ class TestBuildTempCorpus:
         with contextlib.suppress(FileNotFoundError):
             os.remove(path)
 
-    def _run_corpus(self, file_texts, profile="standard", max_sentence_length=0, profile_override=None):
+    def _run_corpus(self, file_texts, profile="standard", max_sentence_length=0, quotas=None):
         """Run _build_temp_corpus with mocked base iterators."""
         files = list(file_texts.keys())
+        if quotas is None:
+            quotas = {"logic": 350_000, "code": 650_000, "tools": 250_000, "web": 750_000, "other": 100_000}
         patches = [
             mock.patch.object(spm_mod.base, "iter_data_files", return_value=iter(files)),
             mock.patch.object(spm_mod.base, "iter_file_texts",
                               side_effect=lambda fp: iter(file_texts.get(fp, []))),
         ]
-        if profile_override is not None:
-            patches.append(mock.patch.object(spm_mod, "SPM_PROFILE_DEFAULTS", profile_override))
         with contextlib.ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
-            return spm_mod._build_temp_corpus(profile, max_sentence_length, code_fidelity_mode=False)
-
-    def _small_profile(self, logic_quota):
-        return {
-            "standard": {
-                "input_sentence_size": 10,
-                "max_sentence_length": 2048,
-                "domain_quota": {"logic": logic_quota, "code": 0, "tools": 0, "web": 0, "other": 0},
-            }
-        }
+            return spm_mod._build_temp_corpus(profile, quotas, max_sentence_length, code_fidelity_mode=False)
 
     def test_writes_sentences_to_corpus(self):
         path, total = self._run_corpus({"/data/logic/a.jsonl": ["hello world", "foo bar"]})
@@ -207,7 +227,12 @@ class TestBuildTempCorpus:
             stack.enter_context(
                 mock.patch.object(spm_mod.base, "iter_file_texts", side_effect=lambda fp: iter(file_texts.get(fp, [])))
             )
-            path, _ = spm_mod._build_temp_corpus("standard", 0, code_fidelity_mode=True)
+            path, _ = spm_mod._build_temp_corpus(
+                "standard",
+                {"logic": 350_000, "code": 650_000, "tools": 250_000, "web": 750_000, "other": 100_000},
+                0,
+                code_fidelity_mode=True,
+            )
         try:
             assert Path(path).read_text().splitlines() == ["line1", "  line2"]
         finally:
@@ -218,7 +243,10 @@ class TestBuildTempCorpus:
             "/data/logic/first.jsonl": ["first sentence"],
             "/data/logic/second.jsonl": ["should be skipped"],
         }
-        path, total = self._run_corpus(file_texts, profile_override=self._small_profile(1))
+        path, total = self._run_corpus(
+            file_texts,
+            quotas={"logic": 1, "code": 0, "tools": 0, "web": 0, "other": 0},
+        )
         try:
             assert total == 1
             assert "should be skipped" not in Path(path).read_text().splitlines()
@@ -228,7 +256,7 @@ class TestBuildTempCorpus:
     def test_inner_quota_breaks_mid_file(self):
         path, total = self._run_corpus(
             {"/data/logic/a.jsonl": ["one", "two", "three"]},
-            profile_override=self._small_profile(2),
+            quotas={"logic": 2, "code": 0, "tools": 0, "web": 0, "other": 0},
         )
         try:
             assert Path(path).read_text().splitlines() == ["one", "two"]
@@ -308,6 +336,10 @@ class TestMain:
         args.output_dir = "custom_agentic_tokenizer_spm"
         args.input_sentence_size = None
         args.max_sentence_length = None
+        args.profile_file = None
+        args.quota_total_lines = None
+        args.quota_weights = None
+        args.quota_overrides = None
         for k, v in overrides.items():
             setattr(args, k, v)
         return args
@@ -340,6 +372,7 @@ class TestMain:
             spm_mod.main()
 
         assert mock_corpus.call_args.kwargs["profile"] == "standard"
+        assert sum(mock_corpus.call_args.kwargs["quotas"].values()) == 2_100_000
         assert mock_corpus.call_args.kwargs["max_sentence_length"] == 1024
         assert mock_corpus.call_args.kwargs["code_fidelity_mode"] is False
         assert mock_train.call_args.kwargs["input_sentence_size"] == 500_000
@@ -357,10 +390,31 @@ class TestMain:
             spm_mod.main()
 
         assert mock_corpus.call_args.kwargs["profile"] == "kaggle"
+        assert sum(mock_corpus.call_args.kwargs["quotas"].values()) == 1_000_000
         assert mock_corpus.call_args.kwargs["max_sentence_length"] == 1600
         assert mock_corpus.call_args.kwargs["code_fidelity_mode"] is False
         assert mock_train.call_args.kwargs["input_sentence_size"] == 500_000
         assert mock_train.call_args.kwargs["max_sentence_length"] == 1600
+
+    def test_main_applies_quota_weight_and_override(self, tmp_path):
+        args = self._mock_args(
+            output_dir=str(tmp_path),
+            quota_total_lines=1_000,
+            quota_weights="code=0.5,web=0.2,logic=0.2,tools=0.05,other=0.05",
+            quota_overrides="code=450",
+        )
+        corpus_path = str(tmp_path / "corpus.txt")
+
+        with mock.patch.object(spm_mod, "parse_args", return_value=args), \
+             mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 50)) as mock_corpus, \
+             mock.patch.object(spm.SentencePieceTrainer, "train"), \
+             mock.patch.object(spm_mod, "_export_hf_tokenizer"), \
+             mock.patch.object(spm_mod.os, "remove"):
+            spm_mod.main()
+
+        quotas = mock_corpus.call_args.kwargs["quotas"]
+        assert quotas["code"] == 450
+        assert sum(quotas.values()) >= 950
 
     def test_main_raises_on_empty_corpus(self, tmp_path):
         args = self._mock_args(output_dir=str(tmp_path))
