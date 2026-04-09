@@ -15,6 +15,7 @@
 import os
 import torch
 from transformers import AutoTokenizer
+from context_config import CONTEXT_LENGTH
 from model import BitMambaLLM, maybe_autocast
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -58,6 +59,7 @@ def generate(model, tokenizer, prompt, max_new_tokens=150, temperature=0.7):
 def main() -> int:
     print("Loading custom tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained("custom_agentic_tokenizer")
+    tokenizer.model_max_length = CONTEXT_LENGTH
     
     print(f"Loading {MODE.upper()} BitMamba model from {CKPT_PATH}...")
     model = BitMambaLLM(**MODEL_CONFIG).to(DEVICE)

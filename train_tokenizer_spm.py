@@ -21,6 +21,7 @@ from pathlib import Path
 import sentencepiece as spm
 
 import train_tokenizer as base
+from context_config import CONTEXT_LENGTH
 
 
 def _resolve_profile(explicit_profile):
@@ -201,7 +202,19 @@ def _build_temp_corpus(profile, max_sentence_length, code_fidelity_mode=False):
         temp.close()
 
 
-def _export_hf_tokenizer(spm_model_path, output_dir):
+def _resolve_model_max_length():
+    raw = os.getenv("TOKENIZER_MODEL_MAX_LENGTH")
+    if raw:
+        try:
+            parsed = int(raw)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+    return CONTEXT_LENGTH
+
+
+def _export_hf_tokenizer(spm_model_path, output_dir, model_max_length=CONTEXT_LENGTH):
     processor = spm.SentencePieceProcessor(model_file=spm_model_path)
 
     try:
@@ -237,6 +250,7 @@ def _export_hf_tokenizer(spm_model_path, output_dir):
             eos_token="<|eos|>",
             unk_token="<|unk|>",
             pad_token="<|pad|>",
+            model_max_length=model_max_length,
         )
         tokenizer.save_pretrained(output_dir)
         print(f"Saved HuggingFace tokenizer files to ./{output_dir}")
@@ -274,6 +288,7 @@ def _export_hf_tokenizer(spm_model_path, output_dir):
             eos_token="<|eos|>",
             unk_token="<|unk|>",
             pad_token="<|pad|>",
+            model_max_length=model_max_length,
         )
         tokenizer.save_pretrained(output_dir)
         print(f"Saved HuggingFace tokenizer files to ./{output_dir}")
@@ -341,7 +356,11 @@ def main():
         os.remove(corpus_path)
 
     spm_model_path = str(model_prefix) + ".model"
-    _export_hf_tokenizer(spm_model_path, str(output_dir))
+    _export_hf_tokenizer(
+        spm_model_path,
+        str(output_dir),
+        model_max_length=_resolve_model_max_length(),
+    )
 
     print(f"Done. SentencePiece artifacts in ./{output_dir}")
 

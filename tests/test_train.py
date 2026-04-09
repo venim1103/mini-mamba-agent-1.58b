@@ -125,6 +125,14 @@ class TestTrainConfigs:
         total_pct = sum(p["pct"] for p in CURRICULUM_CONFIG["phases"])
         assert total_pct == pytest.approx(1.0, abs=0.01)
 
+    def test_early_phases_use_half_context(self):
+        from train import CURRICULUM_CONFIG, CONTEXT_LENGTH, HALF_CONTEXT_LENGTH
+        phases = CURRICULUM_CONFIG["phases"]
+        assert phases[0]["ctx"] == HALF_CONTEXT_LENGTH
+        assert phases[1]["ctx"] == HALF_CONTEXT_LENGTH
+        assert phases[2]["ctx"] == HALF_CONTEXT_LENGTH
+        assert phases[3]["ctx"] == CONTEXT_LENGTH
+
     def test_model_configs_valid_dimensions(self):
         from train import MODEL_CONFIG
         assert MODEL_CONFIG["vocab_size"] > 0
@@ -186,11 +194,7 @@ class TestRunTrainingStepsIntegration:
         tmp_path, monkeypatch
     ):
         import train
-        from model import BitMambaLLM
-        from optim import setup_mamba_optimizers, FGWSD_Scheduler
 
-        TINY_CFG = dict(vocab_size=64, dim=32, n_layers=1, d_state=16,
-                        expand=2, use_checkpoint=False)
         TINY_BATCH = 2
         SEQ_LEN = 16
         TOTAL = 2
@@ -200,19 +204,43 @@ class TestRunTrainingStepsIntegration:
         monkeypatch.setattr(train, 'BATCH_SIZE', TINY_BATCH)
         monkeypatch.setattr(train, 'GRAD_ACCUM_STEPS', 1)
         monkeypatch.setattr(train, 'SAVE_EVERY', 1)
-        monkeypatch.setattr(train, 'SAFE_DIVISOR', float(TINY_BATCH * 16384))
+        monkeypatch.setattr(train, 'SAFE_DIVISOR', float(TINY_BATCH * train.CONTEXT_LENGTH))
 
-        model = BitMambaLLM(**TINY_CFG)
-        muon_opt, adam_opt, mamba_core_opt = setup_mamba_optimizers(
-            model, {"peak_lr": 1e-4, "end_lr": 1e-6}, use_8bit=False
+        class DummyOptimizer:
+            def __init__(self, lr=1e-4):
+                self.param_groups = [{"lr": lr}]
+
+            def zero_grad(self):
+                return None
+
+            def step(self, closure=None):
+                if closure is not None:
+                    closure()
+                return None
+
+            def state_dict(self):
+                return {"state": {}, "param_groups": self.param_groups}
+
+        class DummyScheduler:
+            def get_lr_and_ctx(self, _step):
+                return 1e-4, SEQ_LEN, "Phase_1"
+
+            def step(self, _step):
+                return 1e-4, SEQ_LEN, "Phase_1"
+
+        p = torch.nn.Parameter(torch.zeros(1, dtype=torch.float32, requires_grad=True))
+        model = MagicMock()
+        model.parameters.return_value = [p]
+        model.state_dict.return_value = {"dummy": torch.tensor([1.0])}
+        model.return_value = (
+            torch.tensor(1.0, dtype=torch.float32, requires_grad=True),
+            torch.tensor(float(TINY_BATCH * SEQ_LEN), dtype=torch.float32),
         )
 
-        tiny_phases = [{"pct": 1.0, "ctx": SEQ_LEN}]
-        tiny_curriculum = {"peak_lr": 1e-4, "end_lr": 1e-6, "phases": tiny_phases}
-        scheduler = FGWSD_Scheduler(
-            muon_opt, adam_opt, mamba_core_opt,
-            total_steps=TOTAL, config=tiny_curriculum
-        )
+        muon_opt = DummyOptimizer()
+        adam_opt = DummyOptimizer()
+        mamba_core_opt = DummyOptimizer()
+        scheduler = DummyScheduler()
 
         scaler = torch.amp.GradScaler(enabled=False)
 

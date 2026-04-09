@@ -19,6 +19,7 @@ import wandb
 from model import BitMambaLLM, chunked_cross_entropy, maybe_autocast
 from optim import setup_mamba_optimizers
 from sft_data import SFT_STAGES, create_sft_dataloader
+from context_config import CONTEXT_LENGTH
 from transformers import AutoTokenizer
 from dist_utils import (
     setup_distributed, cleanup_distributed, is_main_process,
@@ -35,9 +36,9 @@ GRAD_ACCUM_STEPS = 8
 # Use FP16 on Ampere (RTX 3090). Change to torch.bfloat16 on Ada Lovelace (RTX 4090).
 AMP_DTYPE = torch.float16
 # Fixed constant to keep loss_sum in a safe range for the FP16 GradScaler.
-# Uses the maximum possible SFT context (16384) so it is safe across all stages.
+# Uses the shared project max context so it is safe across all stages.
 # Must match the constant used in the grad_scale calculation below.
-SAFE_DIVISOR = BATCH_SIZE * 16384.0
+SAFE_DIVISOR = BATCH_SIZE * float(CONTEXT_LENGTH)
 
 
 def run_sft_stage(model, tokenizer, stage_cfg, stage_num, global_step):

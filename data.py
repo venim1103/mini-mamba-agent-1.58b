@@ -18,6 +18,7 @@ from torch.utils.data import IterableDataset, DataLoader
 from datasets import load_dataset
 from transformers import AutoTokenizer
 import random
+from context_config import CONTEXT_LENGTH
 
 def get_text_column(dataset_stream):
     sample_row = next(iter(dataset_stream))
@@ -148,7 +149,7 @@ def packed_collate_fn(batch):
     return x, y, padded, n_segs
 
 
-def create_dataloaders(datasets_config, tokenizer_path="custom_agentic_tokenizer", max_seq_len=16384, batch_size=2):
+def create_dataloaders(datasets_config, tokenizer_path="custom_agentic_tokenizer", max_seq_len=CONTEXT_LENGTH, batch_size=2):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     packed_streams, weights = {}, []
     

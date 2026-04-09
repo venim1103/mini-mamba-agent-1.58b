@@ -80,16 +80,14 @@ class TestRunSFTStageIntegration:
     @patch('sft_train.is_main_process', return_value=True)
     @patch('sft_train.get_world_size', return_value=1)
     @patch('sft_train.unwrap_model', side_effect=lambda m: m)
+    @patch('sft_train.setup_mamba_optimizers')
     @patch('sft_train.create_sft_dataloader')
     def test_run_sft_stage_completes_and_saves_checkpoint(
-        self, mock_loader_factory, mock_unwrap, mock_world_size,
+        self, mock_loader_factory, mock_setup_opts, mock_unwrap, mock_world_size,
         mock_is_main, mock_barrier, mock_wandb, tmp_path, monkeypatch
     ):
         import sft_train
-        from model import BitMambaLLM
 
-        TINY_CFG = dict(vocab_size=64, dim=32, n_layers=1, d_state=16,
-                        expand=2, use_checkpoint=False)
         SEQ_LEN = 16
         TINY_BATCH = 2
 
@@ -97,7 +95,7 @@ class TestRunSFTStageIntegration:
         monkeypatch.setattr(sft_train, 'CHECKPOINT_DIR', str(tmp_path))
         monkeypatch.setattr(sft_train, 'BATCH_SIZE', TINY_BATCH)
         monkeypatch.setattr(sft_train, 'GRAD_ACCUM_STEPS', 1)
-        monkeypatch.setattr(sft_train, 'SAFE_DIVISOR', float(TINY_BATCH * 16384.0))
+        monkeypatch.setattr(sft_train, 'SAFE_DIVISOR', float(TINY_BATCH * sft_train.CONTEXT_LENGTH))
 
         x = torch.randint(0, 64, (TINY_BATCH, SEQ_LEN))
         y = torch.randint(0, 64, (TINY_BATCH, SEQ_LEN))
@@ -112,7 +110,19 @@ class TestRunSFTStageIntegration:
         mock_loader.sampler = MagicMock(spec=[])
         mock_loader_factory.return_value = mock_loader
 
-        model = BitMambaLLM(**TINY_CFG)
+        dummy_param = torch.nn.Parameter(torch.zeros(1, dtype=torch.float32, requires_grad=True))
+        model = MagicMock()
+        model.parameters.return_value = [dummy_param]
+        model.state_dict.return_value = {"dummy": torch.tensor([1.0])}
+        model.return_value = (
+            torch.tensor(1.0, dtype=torch.float32, requires_grad=True),
+            torch.tensor(float(TINY_BATCH * max(1, SEQ_LEN - 1)), dtype=torch.float32),
+        )
+        mock_setup_opts.return_value = (
+            torch.optim.SGD([dummy_param], lr=1e-4),
+            torch.optim.SGD([dummy_param], lr=1e-4),
+            torch.optim.SGD([dummy_param], lr=1e-5),
+        )
 
         stage_cfg = {
             "name": "test_stage",

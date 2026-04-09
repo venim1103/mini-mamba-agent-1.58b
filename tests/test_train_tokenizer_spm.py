@@ -56,6 +56,20 @@ class TestAutoTuneInputSentenceSize:
             assert spm_mod._auto_tune_input_sentence_size("kaggle", 500_000) == 3_200_000
 
 
+class TestResolveModelMaxLength:
+    def test_default_uses_context_length(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            assert spm_mod._resolve_model_max_length() == spm_mod.CONTEXT_LENGTH
+
+    def test_env_override_is_used_when_valid(self):
+        with mock.patch.dict(os.environ, {"TOKENIZER_MODEL_MAX_LENGTH": "24576"}, clear=True):
+            assert spm_mod._resolve_model_max_length() == 24_576
+
+    def test_invalid_override_falls_back(self):
+        with mock.patch.dict(os.environ, {"TOKENIZER_MODEL_MAX_LENGTH": "invalid"}, clear=True):
+            assert spm_mod._resolve_model_max_length() == spm_mod.CONTEXT_LENGTH
+
+
 # ---------------------------------------------------------------------------
 # _infer_domain
 # ---------------------------------------------------------------------------

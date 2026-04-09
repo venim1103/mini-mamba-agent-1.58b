@@ -20,6 +20,7 @@ from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 from datasets import load_dataset
+from context_config import CONTEXT_LENGTH
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +41,7 @@ SFT_STAGES = [
         "epochs": 4,
         "lr": 1e-4,
         "reasoning_off_prob": 0.0,   # reasoning always ON
-        "max_seq_len": 4096,
+        "max_seq_len": CONTEXT_LENGTH,
     },
     {
         "name": "mixed",
@@ -53,7 +54,7 @@ SFT_STAGES = [
         "epochs": 2,
         "lr": 5e-5,
         "reasoning_off_prob": 0.3,   # 30% reasoning toggle
-        "max_seq_len": 4096,
+        "max_seq_len": CONTEXT_LENGTH,
     },
     {
         "name": "polish",
@@ -64,7 +65,7 @@ SFT_STAGES = [
         "epochs": 2,
         "lr": 2e-5,
         "reasoning_off_prob": 0.1,   # mostly reasoning ON for tool planning
-        "max_seq_len": 4096,
+        "max_seq_len": CONTEXT_LENGTH,
     },
 ]
 
@@ -88,7 +89,7 @@ def _first_token_id(tokenizer, text, fallback_text=None):
 
 
 class SFTChatDataset(Dataset):
-    def __init__(self, data_path, tokenizer, max_seq_len=4096, reasoning_off_prob=0.3, format_hint=None):
+    def __init__(self, data_path, tokenizer, max_seq_len=CONTEXT_LENGTH, reasoning_off_prob=0.3, format_hint=None):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
@@ -242,7 +243,7 @@ def sft_collate_fn(batch, pad_token_id=0):
     return torch.stack(padded_ids), torch.stack(padded_labels)
 
 
-def create_sft_dataloader(data_paths, tokenizer, max_seq_len=4096, batch_size=2, reasoning_off_prob=0.3):
+def create_sft_dataloader(data_paths, tokenizer, max_seq_len=CONTEXT_LENGTH, batch_size=2, reasoning_off_prob=0.3):
     """Create a DataLoader from one or more data directories/files."""
     if isinstance(data_paths, str):
         data_paths = [data_paths]

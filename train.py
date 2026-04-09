@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 import time
 import wandb
+from context_config import CONTEXT_LENGTH
 from model import BitMambaLLM, maybe_autocast
 from data import create_dataloaders
 from optim import setup_mamba_optimizers, FGWSD_Scheduler
@@ -59,7 +60,8 @@ CHECKPOINT_DIR = f"checkpoints/bitmamba_{MODE}"
 # Static divisor to keep loss_sum in a safe range for the FP16 GradScaler.
 # Must be a fixed constant — do not use current_ctx here, as it changes between
 # FG-WSD phases and would cause logged loss values to jump discontinuously.
-SAFE_DIVISOR = 16384.0 * BATCH_SIZE
+SAFE_DIVISOR = float(CONTEXT_LENGTH) * BATCH_SIZE
+HALF_CONTEXT_LENGTH = max(1, CONTEXT_LENGTH // 2)
 
 # FG-WSD: Data quality progression per phase (Nanbeige4-3B §2.2.2)
 # Keep LR flat while progressively increasing data quality
@@ -106,15 +108,16 @@ TRAIN_CONFIGS = {
 # Legacy single config (used for backward compatibility if needed)
 TRAIN_CONFIG = TRAIN_CONFIGS["Phase_2"]
 
-# UPDATED: Fixed context at 8192 for first 80% (stable phases), only expand to 16384 in decay
+# UPDATED: Use half-context for warmup/stable phases, then expand to the shared
+# project max context during decay.
 # Per Nanbeige4-3B and Nemotron-H: expanding context during stable training ruins dynamics
 CURRICULUM_CONFIG = {
     "peak_lr": PEAK_LR, "end_lr": 1.5e-6,
     "phases": [
-        {"pct": 0.05, "ctx": 8192},   # warmup
-        {"pct": 0.40, "ctx": 8192},   # stable 1
-        {"pct": 0.35, "ctx": 8192},   # stable 2
-        {"pct": 0.20, "ctx": 16384}   # decay (extend context here!)
+        {"pct": 0.05, "ctx": HALF_CONTEXT_LENGTH},   # warmup
+        {"pct": 0.40, "ctx": HALF_CONTEXT_LENGTH},   # stable 1
+        {"pct": 0.35, "ctx": HALF_CONTEXT_LENGTH},   # stable 2
+        {"pct": 0.20, "ctx": CONTEXT_LENGTH}   # decay (extend context here!)
     ]
 }
 
