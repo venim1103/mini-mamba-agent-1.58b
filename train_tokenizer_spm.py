@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import argparse
+import copy
+import json
 import os
 import tempfile
 from collections import defaultdict
@@ -24,12 +26,125 @@ import train_tokenizer as base
 from context_config import CONTEXT_LENGTH
 
 
-def _resolve_profile(explicit_profile):
-    if explicit_profile in {"kaggle", "standard"}:
-        return explicit_profile
+DOMAINS = ("logic", "code", "tools", "web", "other")
+
+
+def _resolve_profile(explicit_profile, profile_registry):
+    if explicit_profile:
+        if explicit_profile in profile_registry:
+            return explicit_profile
+        available = ", ".join(sorted(profile_registry))
+        raise ValueError(f"Unknown profile {explicit_profile!r}. Available profiles: {available}")
     if os.getenv("KAGGLE_KERNEL_RUN_TYPE"):
-        return "kaggle"
-    return "standard"
+        if "kaggle" in profile_registry:
+            return "kaggle"
+        return next(iter(sorted(profile_registry)))
+    if "standard" in profile_registry:
+        return "standard"
+    return next(iter(sorted(profile_registry)))
+
+
+def _parse_domain_map(text, name):
+    result = {}
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(f"{name} must use key=value entries. Got {item!r}.")
+        key, raw_value = item.split("=", 1)
+        key = key.strip().lower()
+        if key not in DOMAINS:
+            raise ValueError(f"Unsupported domain {key!r} in {name}. Expected one of: {', '.join(DOMAINS)}")
+        result[key] = float(raw_value.strip())
+    return result
+
+
+def _normalize_domain_weights(raw_weights):
+    for domain in DOMAINS:
+        if domain not in raw_weights:
+            raise ValueError(f"Missing domain weight for {domain!r}.")
+        if raw_weights[domain] < 0:
+            raise ValueError(f"Domain weight for {domain!r} must be non-negative.")
+    total_weight = sum(raw_weights.values())
+    if total_weight <= 0:
+        raise ValueError("Domain weights must sum to a positive value.")
+    return {domain: raw_weights[domain] / total_weight for domain in DOMAINS}
+
+
+def _calculate_domain_quotas(total_lines, normalized_weights):
+    if total_lines <= 0:
+        raise ValueError("quota_total_lines must be > 0.")
+    quotas = {domain: int(total_lines * normalized_weights[domain]) for domain in DOMAINS}
+    assigned = sum(quotas.values())
+    remainder = total_lines - assigned
+    if remainder > 0:
+        domains_by_fraction = sorted(
+            DOMAINS,
+            key=lambda domain: (total_lines * normalized_weights[domain]) - quotas[domain],
+            reverse=True,
+        )
+        for idx in range(remainder):
+            quotas[domains_by_fraction[idx % len(domains_by_fraction)]] += 1
+    return quotas
+
+
+def _load_profile_registry(profile_file):
+    profile_registry = copy.deepcopy(SPM_PROFILE_DEFAULTS)
+    if not profile_file:
+        return profile_registry
+
+    with open(profile_file, "r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+
+    custom_profiles = raw.get("profiles", raw)
+    if not isinstance(custom_profiles, dict):
+        raise ValueError("Profile file must contain a JSON object (or {'profiles': {...}}).")
+
+    for name, settings in custom_profiles.items():
+        if not isinstance(settings, dict):
+            raise ValueError(f"Profile {name!r} must map to an object.")
+        profile_registry[name] = settings
+
+    return profile_registry
+
+
+def _resolve_profile_settings(args, profile_name, profile_registry):
+    defaults = profile_registry[profile_name]
+    input_sentence_size = args.input_sentence_size if args.input_sentence_size is not None else defaults["input_sentence_size"]
+    max_sentence_length = args.max_sentence_length if args.max_sentence_length is not None else defaults["max_sentence_length"]
+
+    quota_total_lines = (
+        args.quota_total_lines
+        if args.quota_total_lines is not None
+        else defaults.get("quota_total_lines", sum(defaults.get("domain_quota", {}).values()))
+    )
+
+    if "domain_weights" in defaults:
+        domain_weights = dict(defaults["domain_weights"])
+    else:
+        legacy_quota = defaults.get("domain_quota", {})
+        legacy_total = sum(legacy_quota.get(domain, 0) for domain in DOMAINS)
+        if legacy_total <= 0:
+            raise ValueError(f"Profile {profile_name!r} does not define usable domain quotas/weights.")
+        domain_weights = {domain: legacy_quota.get(domain, 0) / legacy_total for domain in DOMAINS}
+
+    if args.quota_weights:
+        domain_weights.update(_parse_domain_map(args.quota_weights, "--quota-weights"))
+    normalized_weights = _normalize_domain_weights(domain_weights)
+    quotas = _calculate_domain_quotas(quota_total_lines, normalized_weights)
+
+    if args.quota_overrides:
+        for domain, value in _parse_domain_map(args.quota_overrides, "--quota-overrides").items():
+            quotas[domain] = max(0, int(value))
+
+    return {
+        "input_sentence_size": input_sentence_size,
+        "max_sentence_length": max_sentence_length,
+        "quota_total_lines": quota_total_lines,
+        "domain_weights": normalized_weights,
+        "domain_quotas": quotas,
+    }
 
 
 def _auto_tune_input_sentence_size(profile, input_sentence_size):
@@ -80,23 +195,25 @@ SPM_PROFILE_DEFAULTS = {
     "standard": {
         "input_sentence_size": 750_000,
         "max_sentence_length": 2048,
-        "domain_quota": {
-            "logic": 350_000,
-            "code": 650_000,
-            "tools": 250_000,
-            "web": 750_000,
-            "other": 100_000,
+        "quota_total_lines": 2_100_000,
+        "domain_weights": {
+            "logic": 0.1667,
+            "code": 0.3095,
+            "tools": 0.1190,
+            "web": 0.3571,
+            "other": 0.0476,
         },
     },
     "kaggle": {
         "input_sentence_size": 500_000,
         "max_sentence_length": 1600,
-        "domain_quota": {
-            "logic": 220_000,
-            "code": 300_000,
-            "tools": 160_000,
-            "web": 280_000,
-            "other": 40_000,
+        "quota_total_lines": 1_000_000,
+        "domain_weights": {
+            "logic": 0.22,
+            "code": 0.30,
+            "tools": 0.16,
+            "web": 0.28,
+            "other": 0.04,
         },
     },
 }
@@ -104,7 +221,11 @@ SPM_PROFILE_DEFAULTS = {
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a low-RAM SentencePiece tokenizer.")
-    parser.add_argument("--profile", choices=["kaggle", "standard"], help="Training profile.")
+    parser.add_argument("--profile", help="Training profile name (built-in or from --profile-file).")
+    parser.add_argument(
+        "--profile-file",
+        help="Optional JSON file with custom profiles. Accepts either {name: {...}} or {'profiles': {name: {...}}}.",
+    )
     parser.add_argument("--vocab-size", type=int, default=64_000)
     parser.add_argument("--model-type", choices=["bpe", "unigram"], default="unigram")
     parser.add_argument("--character-coverage", type=float, default=0.9995)
@@ -127,6 +248,22 @@ def parse_args():
         "--max-sentence-length",
         type=int,
         help="Max sentence length passed to SPM trainer. Uses profile default if omitted.",
+    )
+    parser.add_argument(
+        "--quota-total-lines",
+        type=int,
+        help="Total sampled corpus lines before SPM training. Per-domain quotas are derived from normalized weights.",
+    )
+    parser.add_argument(
+        "--quota-weights",
+        help=(
+            "Comma-separated domain weights (logic=0.2,code=0.4,tools=0.1,web=0.25,other=0.05). "
+            "Values are normalized automatically."
+        ),
+    )
+    parser.add_argument(
+        "--quota-overrides",
+        help="Comma-separated absolute per-domain quotas (e.g. code=400000,web=500000).",
     )
     parser.add_argument(
         "--code-fidelity-mode",
@@ -153,8 +290,7 @@ def _infer_domain(file_path):
     return "other"
 
 
-def _build_temp_corpus(profile, max_sentence_length, code_fidelity_mode=False):
-    quotas = SPM_PROFILE_DEFAULTS[profile]["domain_quota"]
+def _build_temp_corpus(profile, quotas, max_sentence_length, code_fidelity_mode=False):
     domain_counts = defaultdict(int)
     total = 0
 
@@ -299,11 +435,11 @@ def _export_hf_tokenizer(spm_model_path, output_dir, model_max_length=CONTEXT_LE
 
 def main():
     args = parse_args()
-    profile = _resolve_profile(args.profile)
-    defaults = SPM_PROFILE_DEFAULTS[profile]
-
-    input_sentence_size = args.input_sentence_size if args.input_sentence_size is not None else defaults["input_sentence_size"]
-    max_sentence_length = args.max_sentence_length if args.max_sentence_length is not None else defaults["max_sentence_length"]
+    profile_registry = _load_profile_registry(args.profile_file)
+    profile = _resolve_profile(args.profile, profile_registry)
+    settings = _resolve_profile_settings(args, profile, profile_registry)
+    input_sentence_size = settings["input_sentence_size"]
+    max_sentence_length = settings["max_sentence_length"]
 
     if args.input_sentence_size is None:
         input_sentence_size = _auto_tune_input_sentence_size(profile, input_sentence_size)
@@ -313,6 +449,7 @@ def main():
 
     corpus_path, total_lines = _build_temp_corpus(
         profile=profile,
+        quotas=settings["domain_quotas"],
         max_sentence_length=max_sentence_length,
         code_fidelity_mode=args.code_fidelity_mode,
     )
@@ -327,6 +464,11 @@ def main():
             f"Training SentencePiece ({args.model_type}) with vocab={args.vocab_size:,}, "
             f"input_sentence_size={input_sentence_size:,}, max_sentence_length={max_sentence_length}, "
             f"byte_fallback={args.byte_fallback}, code_fidelity_mode={args.code_fidelity_mode}."
+        )
+        print(
+            "Quota design: total_lines="
+            f"{settings['quota_total_lines']:,}, normalized_weights={settings['domain_weights']}, "
+            f"derived_quotas={settings['domain_quotas']}"
         )
 
         spm.SentencePieceTrainer.train(
