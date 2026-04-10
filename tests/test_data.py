@@ -27,6 +27,7 @@ from data import (
     get_text_column,
     create_infinite_stream,
     extract_text_from_row,
+    create_dataloaders,
 )
 
 
@@ -146,23 +147,6 @@ def tok():
 # ---------------------------------------------------------------------------
 
 class TestPackedTokenStream:
-    def test_suppresses_tokenizer_length_warning(self):
-        class _SpyTok(_FakeTok):
-            def __init__(self):
-                self.calls = []
-
-            def __call__(self, *args, **kwargs):
-                self.calls.append(kwargs.copy())
-                return super().__call__(*args, **kwargs)
-
-        tok = _SpyTok()
-        stream = _make_stream(["a" * 100])
-        gen = packed_token_stream(stream, tok, "text", max_seq_len=10)
-        next(gen)
-        assert tok.calls, "Expected tokenizer to be invoked"
-        assert tok.calls[0].get("truncation") is False
-        assert tok.calls[0].get("verbose") is False
-
     def test_uses_dynamic_extractor(self, tok):
         """Verifies packed_token_stream ignores text_column and uses extract_text_from_row."""
         stream = iter([{"problem": "What is 2+2?", "solution": "4"}] * 10)
@@ -376,3 +360,23 @@ class TestAgenticDataMixture:
         for _ in range(10):
             item = next(iter(mix))
             assert item["label"] == "only"
+
+
+class TestCreateDataloaders:
+    def test_sets_tokenizer_model_max_length(self, monkeypatch):
+        import data as data_mod
+
+        fake_tok = MagicMock()
+        fake_tok.eos_token_id = 0
+        fake_tok.model_max_length = 16_384
+        fake_tok.return_value = {"input_ids": [1, 2, 3]}
+
+        monkeypatch.setattr(data_mod.AutoTokenizer, "from_pretrained", MagicMock(return_value=fake_tok))
+        monkeypatch.setattr(data_mod, "load_dataset", MagicMock(return_value=[{"text": "hello"}]))
+        monkeypatch.setattr(data_mod.os.path, "isdir", lambda _p: False)
+
+        cfg = [{"name": "web", "path": "dummy.json", "format": "json", "weight": 1.0}]
+        _loader, tok = create_dataloaders(cfg, batch_size=1, max_seq_len=8)
+
+        assert tok is fake_tok
+        assert tok.model_max_length == int(1e9)
