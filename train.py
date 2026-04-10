@@ -223,10 +223,14 @@ def run_training_steps(model, raw_model, optimizers, scheduler,
 
         for opt in [muon_opt, adam_opt, mamba_core_opt]: scaler.unscale_(opt)
         global_valid_tokens = accumulated_valid_tokens
+        global_loss_sum = accumulated_loss_sum
         if world_size > 1:
             valid_token_tensor = torch.tensor(accumulated_valid_tokens, device=device, dtype=torch.float32)
             torch.distributed.all_reduce(valid_token_tensor, op=torch.distributed.ReduceOp.SUM)
             global_valid_tokens = valid_token_tensor.item()
+            loss_sum_tensor = torch.tensor(accumulated_loss_sum, device=device, dtype=torch.float32)
+            torch.distributed.all_reduce(loss_sum_tensor, op=torch.distributed.ReduceOp.SUM)
+            global_loss_sum = loss_sum_tensor.item()
         grad_scale = (world_size * SAFE_DIVISOR) / max(global_valid_tokens, 1.0)
         for param in model.parameters():
             if param.grad is not None:
@@ -240,7 +244,7 @@ def run_training_steps(model, raw_model, optimizers, scheduler,
 
         for opt in [muon_opt, adam_opt, mamba_core_opt]: opt.zero_grad()
 
-        accumulated_loss = accumulated_loss_sum * grad_scale
+        accumulated_loss = global_loss_sum / max(global_valid_tokens, 1.0)
 
         tokens_this_step = BATCH_SIZE * GRAD_ACCUM_STEPS * current_ctx
         total_tokens += tokens_this_step
@@ -381,4 +385,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

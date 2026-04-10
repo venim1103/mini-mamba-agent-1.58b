@@ -288,3 +288,13 @@ class TestRunTrainingStepsIntegration:
         assert 'scaler_state' in ckpt
         assert 'total_tokens' in ckpt
         assert ckpt.get('wandb_run_id') is None  # wandb.run was None, so this should be None
+
+        # Logged loss should be normalized by valid tokens, not amplified by SAFE_DIVISOR.
+        # With dummy model output: loss_sum=1.0 and valid_tokens=32 => expected 0.03125.
+        wandb_loss_logs = [
+            args[0]["Train/Loss"]
+            for args, kwargs in mock_wandb.log.call_args_list
+            if args and isinstance(args[0], dict) and "Train/Loss" in args[0]
+        ]
+        assert wandb_loss_logs, "Expected at least one Train/Loss wandb log entry"
+        assert wandb_loss_logs[0] == pytest.approx(1.0 / (TINY_BATCH * SEQ_LEN))
