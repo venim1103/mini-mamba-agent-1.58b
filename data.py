@@ -74,15 +74,7 @@ def packed_token_stream(dataset_stream, tokenizer, text_column, max_seq_len):
         text = extract_text_from_row(row)
         if not text: continue
         
-        # We intentionally do not truncate individual documents here because this
-        # stream packs and slices to `max_seq_len` downstream. Disable the HF
-        # "sequence longer than model_max_length" warning to avoid noisy logs.
-        tokens = tokenizer(
-            text,
-            add_special_tokens=False,
-            truncation=False,
-            verbose=False,
-        )["input_ids"] + [tokenizer.eos_token_id]
+        tokens = tokenizer(text, add_special_tokens=False)["input_ids"] + [tokenizer.eos_token_id]
         buffer.extend(tokens)
         doc_lengths.append(len(tokens))
         
@@ -159,6 +151,9 @@ def packed_collate_fn(batch):
 
 def create_dataloaders(datasets_config, tokenizer_path="custom_agentic_tokenizer", max_seq_len=CONTEXT_LENGTH, batch_size=2):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    # Suppress Hugging Face max-length warnings: we pack and slice long docs
+    # manually into max_seq_len windows in packed_token_stream.
+    tokenizer.model_max_length = int(1e9)
     packed_streams, weights = {}, []
     
     # Flatten config to handle subdirectories individually and prevent mixed schema CastErrors
