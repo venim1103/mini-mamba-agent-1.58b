@@ -18,6 +18,8 @@ import argparse
 from huggingface_hub import HfApi
 
 CHECKPOINT_DIR = "checkpoints"
+DEFAULT_POLL_INTERVAL = 15
+DEFAULT_SLEEP_BEFORE_UPLOAD = 0
 
 
 def _log(message: str):
@@ -98,8 +100,8 @@ def run_sync_loop(
     repo_id: str,
     checkpoint_dir: str = CHECKPOINT_DIR,
     *,
-    poll_interval: int = 300,
-    sleep_before_upload: int = 60,
+    poll_interval: int = DEFAULT_POLL_INTERVAL,
+    sleep_before_upload: int = DEFAULT_SLEEP_BEFORE_UPLOAD,
     sleep_fn=time.sleep,
     logger=print,
 ):
@@ -123,6 +125,21 @@ def run_sync_loop(
         except Exception as exc:
             logger(f"Sync cycle failed: {exc}")
         sleep_fn(poll_interval)
+
+
+def _read_int_env(name: str, default: int, *, logger=print) -> int:
+    """Read integer env var safely, logging and falling back on invalid values."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        if value < 0:
+            raise ValueError("negative")
+        return value
+    except Exception:
+        logger(f"Invalid {name}={raw!r}; using default {default}")
+        return default
 
 
 def run_self_check(api: HfApi, repo_id: str, checkpoint_dir: str = CHECKPOINT_DIR, *, logger=print) -> bool:
@@ -197,7 +214,22 @@ def main(argv=None):
     except Exception as exc:
         # Repository may already exist; keep syncing in either case.
         _log(f"create_repo skipped/failed (continuing): {exc}")
-    run_sync_loop(api, repo_id, CHECKPOINT_DIR, logger=_log)
+    poll_interval = _read_int_env("SYNC_POLL_INTERVAL", DEFAULT_POLL_INTERVAL, logger=_log)
+    sleep_before_upload = _read_int_env(
+        "SYNC_SLEEP_BEFORE_UPLOAD", DEFAULT_SLEEP_BEFORE_UPLOAD, logger=_log
+    )
+    _log(
+        f"Sync loop config: poll_interval={poll_interval}s, "
+        f"sleep_before_upload={sleep_before_upload}s"
+    )
+    run_sync_loop(
+        api,
+        repo_id,
+        CHECKPOINT_DIR,
+        poll_interval=poll_interval,
+        sleep_before_upload=sleep_before_upload,
+        logger=_log,
+    )
 
 
 if __name__ == "__main__":

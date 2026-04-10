@@ -106,10 +106,12 @@ def test_main_initializes_api_and_runs_loop(monkeypatch):
 
     called = {}
 
-    def fake_run_sync_loop(api, repo_id, checkpoint_dir, logger):
+    def fake_run_sync_loop(api, repo_id, checkpoint_dir, poll_interval, sleep_before_upload, logger):
         called["api"] = api
         called["repo_id"] = repo_id
         called["checkpoint_dir"] = checkpoint_dir
+        called["poll_interval"] = poll_interval
+        called["sleep_before_upload"] = sleep_before_upload
         called["logger"] = logger
 
     monkeypatch.setattr(background_sync, "run_sync_loop", fake_run_sync_loop)
@@ -121,8 +123,30 @@ def test_main_initializes_api_and_runs_loop(monkeypatch):
         "api": fake_api,
         "repo_id": "org/repo",
         "checkpoint_dir": background_sync.CHECKPOINT_DIR,
+        "poll_interval": background_sync.DEFAULT_POLL_INTERVAL,
+        "sleep_before_upload": background_sync.DEFAULT_SLEEP_BEFORE_UPLOAD,
         "logger": background_sync._log,
     }
+
+
+def test_main_uses_sync_timing_env_overrides(monkeypatch):
+    fake_api = MagicMock()
+    monkeypatch.setenv("REPO_ID", "org/repo")
+    monkeypatch.setenv("HF_TOKEN", "token")
+    monkeypatch.setenv("SYNC_POLL_INTERVAL", "3")
+    monkeypatch.setenv("SYNC_SLEEP_BEFORE_UPLOAD", "1")
+    monkeypatch.setattr(background_sync, "HfApi", MagicMock(return_value=fake_api))
+
+    called = {}
+
+    def fake_run_sync_loop(api, repo_id, checkpoint_dir, poll_interval, sleep_before_upload, logger):
+        called["poll_interval"] = poll_interval
+        called["sleep_before_upload"] = sleep_before_upload
+
+    monkeypatch.setattr(background_sync, "run_sync_loop", fake_run_sync_loop)
+    background_sync.main()
+
+    assert called == {"poll_interval": 3, "sleep_before_upload": 1}
 
 
 def test_main_self_check_mode_success(monkeypatch):
@@ -177,5 +201,4 @@ def test_run_self_check_repo_access_failure_returns_false():
 
     assert ok is False
     assert any("Repo access failed" in msg for msg in logs)
-
 
