@@ -193,21 +193,21 @@ def _auto_tune_input_sentence_size(profile, input_sentence_size):
 
 SPM_PROFILE_DEFAULTS = {
     "standard": {
-        "input_sentence_size": 750_000,
+        "input_sentence_size": 1_500_000,
         "max_sentence_length": 2048,
-        "quota_total_lines": 2_100_000,
+        "quota_total_lines": 2_500_000,
         "domain_weights": {
-            "logic": 0.1667,
-            "code": 0.3095,
-            "tools": 0.1190,
-            "web": 0.3571,
-            "other": 0.0476,
+            "logic": 0.22,
+            "code": 0.30,
+            "tools": 0.16,
+            "web": 0.28,
+            "other": 0.04,
         },
     },
     "kaggle": {
-        "input_sentence_size": 500_000,
-        "max_sentence_length": 1600,
-        "quota_total_lines": 1_000_000,
+        "input_sentence_size": 750_000,
+        "max_sentence_length": 2048,
+        "quota_total_lines": 2_100_000,
         "domain_weights": {
             "logic": 0.22,
             "code": 0.30,
@@ -274,6 +274,15 @@ def parse_args():
             "construction and disabling aggressive whitespace normalization in SPM."
         ),
     )
+    parser.add_argument(
+        "--deterministic",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Make SPM training deterministic/reproducible by disabling sentence shuffle, "
+            "using a single trainer thread, and sampling the full built corpus."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -333,9 +342,42 @@ def _build_temp_corpus(profile, quotas, max_sentence_length, code_fidelity_mode=
         print(f"Temporary corpus built with {total:,} lines.")
         for domain in sorted(quotas):
             print(f"  {domain:>5}: {domain_counts[domain]:,} / {quotas[domain]:,}")
-        return temp_path, total
+        return temp_path, total, dict(domain_counts)
     finally:
         temp.close()
+
+
+def _write_run_manifest(
+    output_dir,
+    profile,
+    settings,
+    requested_input_sentence_size,
+    effective_input_sentence_size,
+    total_lines,
+    domain_counts,
+    args,
+):
+    manifest = {
+        "profile": profile,
+        "vocab_size": args.vocab_size,
+        "model_type": args.model_type,
+        "character_coverage": args.character_coverage,
+        "byte_fallback": args.byte_fallback,
+        "code_fidelity_mode": args.code_fidelity_mode,
+        "deterministic": args.deterministic,
+        "requested_input_sentence_size": requested_input_sentence_size,
+        "effective_input_sentence_size": effective_input_sentence_size,
+        "max_sentence_length": settings["max_sentence_length"],
+        "quota_total_lines": settings["quota_total_lines"],
+        "domain_weights": settings["domain_weights"],
+        "derived_quotas": settings["domain_quotas"],
+        "corpus_total_lines": total_lines,
+        "corpus_domain_counts": domain_counts,
+        "tokenizer_model_max_length": _resolve_model_max_length(),
+    }
+    manifest_path = Path(output_dir) / "training_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"Saved training manifest to ./{manifest_path}")
 
 
 def _resolve_model_max_length():
@@ -447,7 +489,7 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    corpus_path, total_lines = _build_temp_corpus(
+    corpus_path, total_lines, domain_counts = _build_temp_corpus(
         profile=profile,
         quotas=settings["domain_quotas"],
         max_sentence_length=max_sentence_length,
@@ -458,12 +500,23 @@ def main():
         if total_lines == 0:
             raise RuntimeError("No training text found for SentencePiece corpus.")
 
+        requested_input_sentence_size = input_sentence_size
+        if args.deterministic:
+            effective_input_sentence_size = max(1, total_lines)
+            shuffle_input_sentence = False
+            num_threads = 1
+        else:
+            effective_input_sentence_size = input_sentence_size
+            shuffle_input_sentence = True
+            num_threads = max(os.cpu_count() or 1, 1)
+
         model_prefix = output_dir / "spm"
 
         print(
             f"Training SentencePiece ({args.model_type}) with vocab={args.vocab_size:,}, "
-            f"input_sentence_size={input_sentence_size:,}, max_sentence_length={max_sentence_length}, "
-            f"byte_fallback={args.byte_fallback}, code_fidelity_mode={args.code_fidelity_mode}."
+            f"input_sentence_size={effective_input_sentence_size:,}, max_sentence_length={max_sentence_length}, "
+            f"byte_fallback={args.byte_fallback}, code_fidelity_mode={args.code_fidelity_mode}, "
+            f"deterministic={args.deterministic}."
         )
         print(
             "Quota design: total_lines="
@@ -477,8 +530,8 @@ def main():
             model_type=args.model_type,
             vocab_size=args.vocab_size,
             character_coverage=args.character_coverage,
-            input_sentence_size=input_sentence_size,
-            shuffle_input_sentence=True,
+            input_sentence_size=effective_input_sentence_size,
+            shuffle_input_sentence=shuffle_input_sentence,
             max_sentence_length=max_sentence_length,
             pad_id=0,
             unk_id=1,
@@ -492,7 +545,18 @@ def main():
             byte_fallback=args.byte_fallback,
             split_by_whitespace=not args.code_fidelity_mode,
             remove_extra_whitespaces=not args.code_fidelity_mode,
-            num_threads=max(os.cpu_count() or 1, 1),
+            num_threads=num_threads,
+        )
+
+        _write_run_manifest(
+            output_dir=str(output_dir),
+            profile=profile,
+            settings=settings,
+            requested_input_sentence_size=requested_input_sentence_size,
+            effective_input_sentence_size=effective_input_sentence_size,
+            total_lines=total_lines,
+            domain_counts=domain_counts,
+            args=args,
         )
     finally:
         os.remove(corpus_path)

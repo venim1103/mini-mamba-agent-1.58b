@@ -97,6 +97,17 @@ class TestIterDataFiles:
 
         assert names == sorted(names)
 
+    def test_returns_deterministic_order_across_subdirs(self, tmp_path):
+        (tmp_path / "zdir").mkdir()
+        (tmp_path / "adir").mkdir()
+        (tmp_path / "zdir" / "b.jsonl").touch()
+        (tmp_path / "adir" / "a.jsonl").touch()
+
+        with mock.patch.object(tt, "DATA_DIR", str(tmp_path)):
+            found = [os.path.relpath(p, str(tmp_path)) for p in tt.iter_data_files()]
+
+        assert found == ["adir/a.jsonl", "zdir/b.jsonl"]
+
 
 # ---------------------------------------------------------------------------
 # iter_text_from_rows
@@ -356,6 +367,28 @@ class TestBackendResolution:
     def test_auto_selects_hf_on_large_ram_standard(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             assert tt._resolve_backend(profile="standard", max_ram_gb=64) == "hf"
+
+
+class TestRunSentencePieceBackend:
+    def test_forwards_deterministic_flag(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "TOKENIZER_SPM_DETERMINISTIC": "true",
+                "TOKENIZER_SPM_INPUT_SENTENCE_SIZE": "123",
+            },
+            clear=True,
+        ), mock.patch.object(tt, "PROFILE", "standard"), \
+            mock.patch.object(tt, "VOCAB_SIZE", 64000), \
+            mock.patch.object(tt, "OUTPUT_DIR", "custom_agentic_tokenizer"), \
+            mock.patch.object(tt, "sys") as mock_sys, \
+            mock.patch.object(tt.os, "execv") as mock_execv:
+            mock_sys.executable = "/usr/bin/python"
+            tt._run_sentencepiece_backend()
+
+        command = mock_execv.call_args.args[1]
+        assert "--deterministic" in command
+        assert "--input-sentence-size" in command
 
 
 # ---------------------------------------------------------------------------

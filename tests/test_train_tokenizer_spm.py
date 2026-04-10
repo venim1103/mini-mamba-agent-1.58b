@@ -133,6 +133,7 @@ class TestParseArgs:
         assert args.quota_weights is None
         assert args.quota_overrides is None
         assert args.code_fidelity_mode is False
+        assert args.deterministic is False
 
     def test_explicit_args(self):
         argv = [
@@ -148,6 +149,7 @@ class TestParseArgs:
             "--quota-weights", "code=0.5,web=0.3,logic=0.1,tools=0.07,other=0.03",
             "--quota-overrides", "code=9999",
             "--code-fidelity-mode",
+            "--deterministic",
         ]
         with mock.patch.object(sys, "argv", argv):
             args = spm_mod.parse_args()
@@ -162,6 +164,7 @@ class TestParseArgs:
         assert args.quota_weights.startswith("code=0.5")
         assert args.quota_overrides == "code=9999"
         assert args.code_fidelity_mode is True
+        assert args.deterministic is True
 
 
 # ---------------------------------------------------------------------------
@@ -190,15 +193,16 @@ class TestBuildTempCorpus:
             return spm_mod._build_temp_corpus(profile, quotas, max_sentence_length, code_fidelity_mode=False)
 
     def test_writes_sentences_to_corpus(self):
-        path, total = self._run_corpus({"/data/logic/a.jsonl": ["hello world", "foo bar"]})
+        path, total, counts = self._run_corpus({"/data/logic/a.jsonl": ["hello world", "foo bar"]})
         try:
             assert total == 2
+            assert counts["logic"] == 2
             assert Path(path).read_text().splitlines() == ["hello world", "foo bar"]
         finally:
             self._safe_remove(path)
 
     def test_skips_empty_lines(self):
-        path, total = self._run_corpus({"/data/logic/a.jsonl": ["  ", "", "  hello  "]})
+        path, total, _ = self._run_corpus({"/data/logic/a.jsonl": ["  ", "", "  hello  "]})
         try:
             assert total == 1
             assert Path(path).read_text().splitlines() == ["hello"]
@@ -206,14 +210,14 @@ class TestBuildTempCorpus:
             self._safe_remove(path)
 
     def test_truncates_text_by_max_sentence_length(self):
-        path, _ = self._run_corpus({"/data/logic/a.jsonl": ["abcdefghij"]}, max_sentence_length=4)
+        path, _, _ = self._run_corpus({"/data/logic/a.jsonl": ["abcdefghij"]}, max_sentence_length=4)
         try:
             assert Path(path).read_text().splitlines() == ["abcd"]
         finally:
             self._safe_remove(path)
 
     def test_replaces_newlines_in_text(self):
-        path, _ = self._run_corpus({"/data/logic/a.jsonl": ["line1\nline2"]})
+        path, _, _ = self._run_corpus({"/data/logic/a.jsonl": ["line1\nline2"]})
         try:
             assert Path(path).read_text().splitlines() == ["line1 line2"]
         finally:
@@ -227,7 +231,7 @@ class TestBuildTempCorpus:
             stack.enter_context(
                 mock.patch.object(spm_mod.base, "iter_file_texts", side_effect=lambda fp: iter(file_texts.get(fp, [])))
             )
-            path, _ = spm_mod._build_temp_corpus(
+            path, _, _ = spm_mod._build_temp_corpus(
                 "standard",
                 {"logic": 350_000, "code": 650_000, "tools": 250_000, "web": 750_000, "other": 100_000},
                 0,
@@ -243,7 +247,7 @@ class TestBuildTempCorpus:
             "/data/logic/first.jsonl": ["first sentence"],
             "/data/logic/second.jsonl": ["should be skipped"],
         }
-        path, total = self._run_corpus(
+        path, total, _ = self._run_corpus(
             file_texts,
             quotas={"logic": 1, "code": 0, "tools": 0, "web": 0, "other": 0},
         )
@@ -254,7 +258,7 @@ class TestBuildTempCorpus:
             self._safe_remove(path)
 
     def test_inner_quota_breaks_mid_file(self):
-        path, total = self._run_corpus(
+        path, total, _ = self._run_corpus(
             {"/data/logic/a.jsonl": ["one", "two", "three"]},
             quotas={"logic": 2, "code": 0, "tools": 0, "web": 0, "other": 0},
         )
@@ -265,9 +269,10 @@ class TestBuildTempCorpus:
             self._safe_remove(path)
 
     def test_returns_zero_total_on_empty_data(self):
-        path, total = self._run_corpus({})
+        path, total, counts = self._run_corpus({})
         try:
             assert total == 0
+            assert all(v == 0 for v in counts.values())
         finally:
             self._safe_remove(path)
 
@@ -333,6 +338,7 @@ class TestMain:
         args.character_coverage = 0.9995
         args.byte_fallback = True
         args.code_fidelity_mode = False
+        args.deterministic = False
         args.output_dir = "custom_agentic_tokenizer_spm"
         args.input_sentence_size = None
         args.max_sentence_length = None
@@ -349,15 +355,17 @@ class TestMain:
         corpus_path = str(tmp_path / "corpus.txt")
 
         with mock.patch.object(spm_mod, "parse_args", return_value=args), \
-             mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 100)) as mock_corpus, \
+               mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 100, {"logic": 10})) as mock_corpus, \
              mock.patch.object(spm.SentencePieceTrainer, "train") as mock_train, \
              mock.patch.object(spm_mod, "_export_hf_tokenizer") as mock_export, \
+               mock.patch.object(spm_mod, "_write_run_manifest") as mock_manifest, \
              mock.patch.object(spm_mod.os, "remove") as mock_remove:
             spm_mod.main()
 
         mock_corpus.assert_called_once()
         mock_train.assert_called_once()
         mock_export.assert_called_once()
+        mock_manifest.assert_called_once()
         mock_remove.assert_called_once_with(corpus_path)
 
     def test_main_uses_explicit_sentence_size_and_length(self, tmp_path):
@@ -365,14 +373,15 @@ class TestMain:
         corpus_path = str(tmp_path / "corpus.txt")
 
         with mock.patch.object(spm_mod, "parse_args", return_value=args), \
-             mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 50)) as mock_corpus, \
+               mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 50, {"logic": 10})) as mock_corpus, \
              mock.patch.object(spm.SentencePieceTrainer, "train") as mock_train, \
              mock.patch.object(spm_mod, "_export_hf_tokenizer"), \
+               mock.patch.object(spm_mod, "_write_run_manifest"), \
              mock.patch.object(spm_mod.os, "remove"):
             spm_mod.main()
 
         assert mock_corpus.call_args.kwargs["profile"] == "standard"
-        assert sum(mock_corpus.call_args.kwargs["quotas"].values()) == 2_100_000
+        assert sum(mock_corpus.call_args.kwargs["quotas"].values()) == spm_mod.SPM_PROFILE_DEFAULTS["standard"]["quota_total_lines"]
         assert mock_corpus.call_args.kwargs["max_sentence_length"] == 1024
         assert mock_corpus.call_args.kwargs["code_fidelity_mode"] is False
         assert mock_train.call_args.kwargs["input_sentence_size"] == 500_000
@@ -383,18 +392,19 @@ class TestMain:
         corpus_path = str(tmp_path / "corpus.txt")
 
         with mock.patch.object(spm_mod, "parse_args", return_value=args), \
-             mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 50)) as mock_corpus, \
+               mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 50, {"logic": 10})) as mock_corpus, \
              mock.patch.object(spm.SentencePieceTrainer, "train") as mock_train, \
              mock.patch.object(spm_mod, "_export_hf_tokenizer"), \
+               mock.patch.object(spm_mod, "_write_run_manifest"), \
              mock.patch.object(spm_mod.os, "remove"):
             spm_mod.main()
 
         assert mock_corpus.call_args.kwargs["profile"] == "kaggle"
-        assert sum(mock_corpus.call_args.kwargs["quotas"].values()) == 1_000_000
-        assert mock_corpus.call_args.kwargs["max_sentence_length"] == 1600
+        assert sum(mock_corpus.call_args.kwargs["quotas"].values()) == spm_mod.SPM_PROFILE_DEFAULTS["kaggle"]["quota_total_lines"]
+        assert mock_corpus.call_args.kwargs["max_sentence_length"] == 2048
         assert mock_corpus.call_args.kwargs["code_fidelity_mode"] is False
-        assert mock_train.call_args.kwargs["input_sentence_size"] == 500_000
-        assert mock_train.call_args.kwargs["max_sentence_length"] == 1600
+        assert mock_train.call_args.kwargs["input_sentence_size"] == 750_000
+        assert mock_train.call_args.kwargs["max_sentence_length"] == 2048
 
     def test_main_applies_quota_weight_and_override(self, tmp_path):
         args = self._mock_args(
@@ -406,9 +416,10 @@ class TestMain:
         corpus_path = str(tmp_path / "corpus.txt")
 
         with mock.patch.object(spm_mod, "parse_args", return_value=args), \
-             mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 50)) as mock_corpus, \
+               mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 50, {"logic": 10})) as mock_corpus, \
              mock.patch.object(spm.SentencePieceTrainer, "train"), \
              mock.patch.object(spm_mod, "_export_hf_tokenizer"), \
+               mock.patch.object(spm_mod, "_write_run_manifest"), \
              mock.patch.object(spm_mod.os, "remove"):
             spm_mod.main()
 
@@ -421,7 +432,7 @@ class TestMain:
         corpus_path = str(tmp_path / "corpus.txt")
 
         with mock.patch.object(spm_mod, "parse_args", return_value=args), \
-             mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 0)), \
+               mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 0, {"logic": 0})), \
              mock.patch.object(spm_mod.os, "remove"):
             with pytest.raises(RuntimeError, match="No training text found"):
                 spm_mod.main()
@@ -431,10 +442,26 @@ class TestMain:
         corpus_path = str(tmp_path / "corpus.txt")
 
         with mock.patch.object(spm_mod, "parse_args", return_value=args), \
-             mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 10)), \
+               mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 10, {"logic": 1})), \
              mock.patch.object(spm.SentencePieceTrainer, "train", side_effect=RuntimeError("spm fail")), \
              mock.patch.object(spm_mod.os, "remove") as mock_remove:
             with pytest.raises(RuntimeError, match="spm fail"):
                 spm_mod.main()
 
         mock_remove.assert_called_once_with(corpus_path)
+
+    def test_main_deterministic_sets_full_input_and_no_shuffle(self, tmp_path):
+        args = self._mock_args(output_dir=str(tmp_path), deterministic=True, input_sentence_size=500_000)
+        corpus_path = str(tmp_path / "corpus.txt")
+
+        with mock.patch.object(spm_mod, "parse_args", return_value=args), \
+             mock.patch.object(spm_mod, "_build_temp_corpus", return_value=(corpus_path, 123, {"logic": 10})), \
+             mock.patch.object(spm.SentencePieceTrainer, "train") as mock_train, \
+             mock.patch.object(spm_mod, "_export_hf_tokenizer"), \
+             mock.patch.object(spm_mod, "_write_run_manifest"), \
+             mock.patch.object(spm_mod.os, "remove"):
+            spm_mod.main()
+
+        assert mock_train.call_args.kwargs["input_sentence_size"] == 123
+        assert mock_train.call_args.kwargs["shuffle_input_sentence"] is False
+        assert mock_train.call_args.kwargs["num_threads"] == 1

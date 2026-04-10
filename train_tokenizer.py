@@ -160,7 +160,8 @@ def maybe_trim_text(text):
     return text
 
 def iter_data_files():
-    for root, _, files in os.walk(DATA_DIR):
+    for root, dirs, files in os.walk(DATA_DIR):
+        dirs.sort()
         for file_name in sorted(files):
             if file_name.endswith(SUPPORTED_SUFFIXES):
                 yield os.path.join(root, file_name)
@@ -481,6 +482,10 @@ def _run_sentencepiece_backend():
     code_fidelity_mode = os.getenv("TOKENIZER_SPM_CODE_FIDELITY")
     if code_fidelity_mode and code_fidelity_mode.strip().lower() in {"1", "true", "yes", "on"}:
         command.append("--code-fidelity-mode")
+
+    deterministic_mode = os.getenv("TOKENIZER_SPM_DETERMINISTIC")
+    if deterministic_mode and deterministic_mode.strip().lower() in {"1", "true", "yes", "on"}:
+        command.append("--deterministic")
 
     print(
         "Tokenizer backend: SentencePiece "
