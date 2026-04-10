@@ -74,7 +74,15 @@ def packed_token_stream(dataset_stream, tokenizer, text_column, max_seq_len):
         text = extract_text_from_row(row)
         if not text: continue
         
-        tokens = tokenizer(text, add_special_tokens=False)["input_ids"] + [tokenizer.eos_token_id]
+        # We intentionally do not truncate individual documents here because this
+        # stream packs and slices to `max_seq_len` downstream. Disable the HF
+        # "sequence longer than model_max_length" warning to avoid noisy logs.
+        tokens = tokenizer(
+            text,
+            add_special_tokens=False,
+            truncation=False,
+            verbose=False,
+        )["input_ids"] + [tokenizer.eos_token_id]
         buffer.extend(tokens)
         doc_lengths.append(len(tokens))
         
@@ -191,4 +199,3 @@ def create_dataloaders(datasets_config, tokenizer_path="custom_agentic_tokenizer
         mixture_dataset, batch_size=batch_size, num_workers=0,
         pin_memory=True, collate_fn=packed_collate_fn,
     ), tokenizer
-
