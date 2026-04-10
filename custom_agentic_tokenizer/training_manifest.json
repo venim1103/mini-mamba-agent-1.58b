@@ -1,0 +1,36 @@
+{
+  "byte_fallback": true,
+  "character_coverage": 0.9995,
+  "code_fidelity_mode": false,
+  "corpus_domain_counts": {
+    "code": 750000,
+    "logic": 550000,
+    "other": 0,
+    "tools": 2245,
+    "web": 700000
+  },
+  "corpus_total_lines": 2002245,
+  "derived_quotas": {
+    "code": 750000,
+    "logic": 550000,
+    "other": 100000,
+    "tools": 400000,
+    "web": 700000
+  },
+  "deterministic": true,
+  "domain_weights": {
+    "code": 0.3,
+    "logic": 0.22,
+    "other": 0.04,
+    "tools": 0.16,
+    "web": 0.28
+  },
+  "effective_input_sentence_size": 2002245,
+  "max_sentence_length": 2048,
+  "model_type": "unigram",
+  "profile": "standard",
+  "quota_total_lines": 2500000,
+  "requested_input_sentence_size": 1500000,
+  "tokenizer_model_max_length": 16384,
+  "vocab_size": 64000
+}
