@@ -123,7 +123,7 @@ class _FakeTok:
     """Minimal tokenizer stand-in that just maps chars to ints 1-26."""
     eos_token_id = 0
 
-    def __call__(self, text, add_special_tokens=False):
+    def __call__(self, text, add_special_tokens=False, truncation=False, verbose=True):
         ids = [min(ord(c) % 27 + 1, 26) for c in text]
         return {"input_ids": ids}
 
@@ -146,6 +146,23 @@ def tok():
 # ---------------------------------------------------------------------------
 
 class TestPackedTokenStream:
+    def test_suppresses_tokenizer_length_warning(self):
+        class _SpyTok(_FakeTok):
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, *args, **kwargs):
+                self.calls.append(kwargs.copy())
+                return super().__call__(*args, **kwargs)
+
+        tok = _SpyTok()
+        stream = _make_stream(["a" * 100])
+        gen = packed_token_stream(stream, tok, "text", max_seq_len=10)
+        next(gen)
+        assert tok.calls, "Expected tokenizer to be invoked"
+        assert tok.calls[0].get("truncation") is False
+        assert tok.calls[0].get("verbose") is False
+
     def test_uses_dynamic_extractor(self, tok):
         """Verifies packed_token_stream ignores text_column and uses extract_text_from_row."""
         stream = iter([{"problem": "What is 2+2?", "solution": "4"}] * 10)
