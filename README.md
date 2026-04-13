@@ -126,6 +126,54 @@ ln -sfn ../../sft/reasoning/open-math-reasoning local_data/rl/reasoning/open-mat
 hf download nvidia/OpenMathReasoning --repo-type dataset --local-dir local_data/rl/reasoning/open-math-reasoning
 ```
 
+## Build Validation Set
+
+This repo now includes a standalone validation-set builder at `build_validation_dataset.py` so the held-out bundle can be generated separately from training and reused across local runs, Colab, or Kaggle.
+
+Default behavior builds a balanced 5-pillar bundle:
+
+- `math`: GSM8K test
+- `logic`: SciQ validation
+- `code`: MBPP sanitized test
+- `tools`: tail slice of Glaive function-calling v2
+- `web`: a deep FineWeb-Edu full-dataset shard
+
+Run it locally or in Colab after exporting `HF_TOKEN`:
+
+```bash
+python build_validation_dataset.py --output-dir val_data
+```
+
+Upload the generated bundle to Kaggle:
+
+```bash
+python build_validation_dataset.py \
+  --output-dir val_data \
+  --upload-kaggle \
+  --kaggle-dataset-id <kaggle-username>/mini-mamba-1b58-validation
+```
+
+On Kaggle notebooks, you can have the script populate missing `HF_TOKEN`, `KAGGLE_USERNAME`, and `KAGGLE_KEY` from `kaggle_secrets`:
+
+```bash
+python build_validation_dataset.py \
+  --output-dir /kaggle/working/val_data \
+  --load-kaggle-secrets \
+  --upload-kaggle \
+  --kaggle-dataset-id <kaggle-username>/mini-mamba-1b58-validation
+```
+
+The builder writes `validation_manifest.json` alongside the parquet files so downstream eval runs can record the exact source plan they used.
+
+Important caveats:
+
+- The pretraining curriculum is defined in `train.py`, not `context_config.py`.
+- The current training mix has 4 top-level buckets; the validation plan intentionally splits the formal-logic bucket into separate math and logic probes.
+- The default 1:1:1:1:1 pillar balance is an evaluation policy, not a mathematically required ratio.
+- The FineWeb shard choice reduces overlap risk with the `sample-10BT` training subset, but it is not a formal zero-overlap guarantee.
+
+If you want different sources or stricter benchmarks, pass a JSON config with `--config-file` and override the built-in preset.
+
 ## 🛠️ Getting Started
 
 ### (0. Optional Development Environment)
