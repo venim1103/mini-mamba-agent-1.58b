@@ -6,3 +6,4 @@ htmlcov/
 .coverage
 .coverage.*
 *.pyc
+wandb

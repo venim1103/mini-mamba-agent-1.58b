@@ -283,6 +283,26 @@ MODE=scout python train.py
 # MODE=parent python train.py
 ```
 
+AMP dtype is now configurable via CLI and defaults to `fp16`:
+
+```bash
+# default (recommended for RTX 3090 and Kaggle T4)
+MODE=scout python train.py
+
+# explicitly force fp16
+MODE=scout python train.py --amp-dtype fp16
+
+# use bf16 when testing on supported GPUs (for example RTX A3000)
+MODE=scout python train.py --amp-dtype bf16
+
+# auto-pick bf16 when supported, else fp16
+MODE=scout python train.py --amp-dtype auto
+```
+
+Notes:
+- Default behavior remains FP16 to preserve throughput and parity with common training targets (RTX 3090 / T4).
+- If `--amp-dtype bf16` is selected on a GPU without BF16 support, training falls back to FP16.
+
 For post-upscale continued pre-training (required after running `upscale.py`):
 
 ```bash

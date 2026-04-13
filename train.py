@@ -14,6 +14,7 @@
 
 import os
 import glob
+import argparse
 # Set CUDA allocator config to reduce fragmentation on 16GB GPUs
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -120,6 +121,30 @@ CURRICULUM_CONFIG = {
         {"pct": 0.20, "ctx": CONTEXT_LENGTH}   # decay (extend context here!)
     ]
 }
+
+
+def _parse_runtime_args():
+    """Parse optional runtime flags without breaking torchrun/ddp launchers."""
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument(
+        "--amp-dtype",
+        choices=["fp16", "bf16", "auto"],
+        default="fp16",
+        help="AMP dtype policy (default: fp16).",
+    )
+    args, _ = parser.parse_known_args()
+    return args
+
+
+def _resolve_amp_dtype(amp_dtype_arg):
+    if amp_dtype_arg == "fp16":
+        return torch.float16
+    if amp_dtype_arg == "bf16":
+        if torch.cuda.is_available() and not torch.cuda.is_bf16_supported():
+            return torch.float16
+        return torch.bfloat16
+    # auto
+    return torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
 
 def create_seq_idx_batch(cu_seqlens_padded, n_segs, seqlen):
     """Create per-batch-element seq_idx from padded cu_seqlens.
@@ -296,7 +321,10 @@ def load_latest_checkpoint(checkpoint_dir, raw_model, optimizers, scaler, device
     return ckpt['step'] + 1, ckpt.get('wandb_run_id'), total_tokens
 
 def main():
-    global DEVICE
+    global DEVICE, AMP_DTYPE
+    args = _parse_runtime_args()
+    AMP_DTYPE = _resolve_amp_dtype(args.amp_dtype)
+
     rank, local_rank, world_size, device = setup_distributed()
     DEVICE = device  # update module-level DEVICE for create_seq_idx_batch
 
@@ -304,6 +332,7 @@ def main():
     
     if is_main_process():
         print(f"Initializing {MODE.upper()} BitMamba Model...")
+        print(f"AMP dtype: {AMP_DTYPE}")
     model = BitMambaLLM(**MODEL_CONFIG).to(DEVICE)
     
     # Load upscaled checkpoint if in continued pretraining mode
