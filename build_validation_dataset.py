@@ -43,13 +43,18 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from datasets import Dataset, load_dataset
+from datasets import Dataset, load_dataset, load_dataset_builder
 from huggingface_hub import HfFileSystem
 
 
 DEFAULT_PRESET = "balanced_5pillar"
 DEFAULT_ROWS_PER_PILLAR = 900
 DEFAULT_FINEWEB_GLOB = "datasets/HuggingFaceFW/fineweb-edu/data/*.parquet"
+DEFAULT_FINEWEB_GLOB_CANDIDATES = (
+    "datasets/HuggingFaceFW/fineweb-edu/data/*.parquet",
+    "datasets/HuggingFaceFW/fineweb-edu/*/*/*.parquet",
+    "datasets/HuggingFaceFW/fineweb-edu/**/**/*.parquet",
+)
 
 
 def _build_default_specs(rows_per_pillar=DEFAULT_ROWS_PER_PILLAR, fineweb_shard_index=500):
@@ -86,10 +91,10 @@ def _build_default_specs(rows_per_pillar=DEFAULT_ROWS_PER_PILLAR, fineweb_shard_
             "output_file": "mbpp_test.parquet",
             "source_type": "hf_dataset",
             "dataset": "mbpp",
-            "config": "sanitized",
             "split": "test",
             "selection": "head",
             "rows": rows_per_pillar,
+            "max_rows_hint": 500,
             "notes": "Held-out code generation benchmark.",
         },
         {
@@ -201,6 +206,81 @@ def _validate_specs(specs):
             )
 
 
+def _rebalance_rows_to_min_capacity(specs):
+    raise NotImplementedError("Use _rebalance_rows_to_min_capacity_with_probe instead.")
+
+
+def _probe_hf_dataset_capacity(spec, hf_token):
+    """Return split capacity (num_examples) without materializing the dataset."""
+    dataset_name = spec["dataset"]
+    config_name = spec.get("config")
+    split_name = spec["split"]
+
+    try:
+        if config_name:
+            builder = load_dataset_builder(dataset_name, config_name, token=hf_token)
+        else:
+            builder = load_dataset_builder(dataset_name, token=hf_token)
+    except Exception:
+        return None
+
+    split_info = getattr(builder.info, "splits", {}).get(split_name)
+    if split_info is None:
+        return None
+    num_examples = getattr(split_info, "num_examples", None)
+    if num_examples is None:
+        return None
+    try:
+        return int(num_examples)
+    except (TypeError, ValueError):
+        return None
+
+
+def _rebalance_rows_to_min_capacity_with_probe(specs, hf_token=None, probe_capacities=True):
+    """Balance row budgets using requested rows, hints, and optional split probing.
+
+    Returns:
+        balanced_rows: int
+        limiting: list[dict] entries for pillars that determined the minimum
+        details: list[dict] per-pillar effective limits and reasons
+    """
+    details = []
+    for spec in specs:
+        requested_rows = int(spec["rows"])
+        effective_rows = requested_rows
+        limiters = [f"requested={requested_rows}"]
+
+        hint = spec.get("max_rows_hint")
+        if hint is not None:
+            hint_int = int(hint)
+            if hint_int < effective_rows:
+                effective_rows = hint_int
+            limiters.append(f"max_rows_hint={hint_int}")
+
+        if probe_capacities and spec.get("source_type") == "hf_dataset":
+            probed = _probe_hf_dataset_capacity(spec, hf_token)
+            if probed is not None:
+                if probed < effective_rows:
+                    effective_rows = probed
+                limiters.append(f"probed_split_size={probed}")
+
+        details.append(
+            {
+                "name": spec.get("name", "unknown"),
+                "effective_rows": effective_rows,
+                "limiters": limiters,
+            }
+        )
+
+    balanced_rows = min(d["effective_rows"] for d in details)
+    limiting = [d for d in details if d["effective_rows"] == balanced_rows]
+
+    for spec in specs:
+        spec["rows"] = balanced_rows
+
+    return balanced_rows, limiting, details
+
+
 def _maybe_load_kaggle_secrets(secret_names=("HF_TOKEN", "KAGGLE_USERNAME", "KAGGLE_KEY")):
     try:
         kaggle_secrets = importlib.import_module("kaggle_secrets")
@@ -284,10 +364,28 @@ def _load_fineweb_shard(spec, hf_token, allow_partial=False):
     rows = int(spec["rows"])
     shard_index = int(spec.get("shard_index", 0))
     fs = HfFileSystem(token=hf_token)
-    parquet_files = sorted(fs.glob(spec["file_glob"]))
+
+    parquet_files = []
+    tried_globs = []
+    candidate_globs = [spec.get("file_glob", DEFAULT_FINEWEB_GLOB)]
+    for fallback in DEFAULT_FINEWEB_GLOB_CANDIDATES:
+        if fallback not in candidate_globs:
+            candidate_globs.append(fallback)
+
+    for pattern in candidate_globs:
+        tried_globs.append(pattern)
+        parquet_files = sorted(fs.glob(pattern))
+        if parquet_files:
+            matched_glob = pattern
+            break
+    else:
+        matched_glob = None
 
     if not parquet_files:
-        raise RuntimeError(f"No files matched {spec['file_glob']!r}.")
+        raise RuntimeError(
+            "No FineWeb parquet files matched any known glob pattern. "
+            f"Tried: {tried_globs}"
+        )
 
     if shard_index < 0:
         shard_index += len(parquet_files)
@@ -321,6 +419,8 @@ def _load_fineweb_shard(spec, hf_token, allow_partial=False):
         "actual_rows": len(records),
         "shard_count": len(parquet_files),
         "shard_index": shard_index,
+        "matched_glob": matched_glob,
+        "tried_globs": tried_globs,
     }
 
 
@@ -399,6 +499,24 @@ def parse_args():
         type=int,
         default=DEFAULT_ROWS_PER_PILLAR,
         help="Default number of rows per pillar for built-in presets.",
+    )
+    parser.add_argument(
+        "--rebalance-to-min",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Keep pillar sizes balanced by lowering all row counts to the smallest "
+            "feasible target across selected sources."
+        ),
+    )
+    parser.add_argument(
+        "--probe-capacities",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Probe HF dataset split capacities (num_examples) to choose a safe "
+            "balanced row target before building pillars."
+        ),
     )
     parser.add_argument(
         "--fineweb-shard-index",
@@ -485,6 +603,16 @@ def main():
         preset_description = preset["description"]
 
     _validate_specs(specs)
+
+    if args.rebalance_to_min:
+        balanced_rows, limiting, _details = _rebalance_rows_to_min_capacity_with_probe(
+            specs,
+            hf_token=_resolve_hf_token(args.hf_token_env),
+            probe_capacities=args.probe_capacities,
+        )
+        print(f"Using balanced row target per pillar: {balanced_rows}")
+        for entry in limiting:
+            print(f"  constrained by {entry['name']}: {', '.join(entry['limiters'])}")
 
     hf_token = _resolve_hf_token(args.hf_token_env)
     results = []

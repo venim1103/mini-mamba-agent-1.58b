@@ -1,5 +1,6 @@
 import json
 import types
+from collections import OrderedDict
 
 import pytest
 
@@ -159,6 +160,65 @@ def test_streaming_select_rows_tail():
     assert [r["i"] for r in records] == [7, 8, 9]
 
 
+def test_rebalance_rows_to_min_capacity_with_hint():
+    specs = [
+        {"name": "math", "rows": 900},
+        {"name": "code", "rows": 900, "max_rows_hint": 500},
+        {"name": "tools", "rows": 900},
+    ]
+
+    balanced, limiting, details = builder._rebalance_rows_to_min_capacity_with_probe(
+        specs,
+        hf_token=None,
+        probe_capacities=False,
+    )
+
+    assert balanced == 500
+    assert [spec["rows"] for spec in specs] == [500, 500, 500]
+    assert any(entry["name"] == "code" for entry in limiting)
+    assert len(details) == 3
+
+
+def test_rebalance_rows_to_min_capacity_without_hints():
+    specs = [
+        {"name": "math", "rows": 256},
+        {"name": "code", "rows": 128},
+        {"name": "tools", "rows": 512},
+    ]
+
+    balanced, limiting, _details = builder._rebalance_rows_to_min_capacity_with_probe(
+        specs,
+        hf_token=None,
+        probe_capacities=False,
+    )
+
+    assert balanced == 128
+    assert [spec["rows"] for spec in specs] == [128, 128, 128]
+    assert any(entry["name"] == "code" for entry in limiting)
+
+
+def test_rebalance_rows_uses_probed_capacity(monkeypatch):
+    specs = [
+        {"name": "math", "rows": 900, "source_type": "hf_dataset", "dataset": "a", "split": "train"},
+        {"name": "code", "rows": 900, "source_type": "hf_dataset", "dataset": "b", "split": "test"},
+    ]
+
+    def fake_probe(spec, hf_token):
+        return 700 if spec["name"] == "math" else 400
+
+    monkeypatch.setattr(builder, "_probe_hf_dataset_capacity", fake_probe)
+
+    balanced, limiting, _details = builder._rebalance_rows_to_min_capacity_with_probe(
+        specs,
+        hf_token="token",
+        probe_capacities=True,
+    )
+
+    assert balanced == 400
+    assert [spec["rows"] for spec in specs] == [400, 400]
+    assert any(entry["name"] == "code" for entry in limiting)
+
+
 def test_load_remote_dataset_head_uses_streaming(monkeypatch):
     calls = []
 
@@ -230,3 +290,75 @@ def test_load_remote_dataset_tail_partial_disallowed(monkeypatch):
     }
     with pytest.raises(ValueError, match="requested 6 rows"):
         builder._load_remote_dataset(spec, hf_token=None, allow_partial=False)
+
+
+def test_load_fineweb_shard_uses_fallback_glob(monkeypatch):
+    class FakeFS:
+        def __init__(self, token=None):
+            self.calls = []
+            self._map = OrderedDict(
+                [
+                    ("datasets/HuggingFaceFW/fineweb-edu/data/*.parquet", []),
+                    (
+                        "datasets/HuggingFaceFW/fineweb-edu/*/*/*.parquet",
+                        ["datasets/HuggingFaceFW/fineweb-edu/data/A/train-00000.parquet"],
+                    ),
+                ]
+            )
+
+        def glob(self, pattern):
+            self.calls.append(pattern)
+            return self._map.get(pattern, [])
+
+    class FakeDataset:
+        def __init__(self, rows):
+            self.num_rows = len(rows)
+
+    fs_instance = FakeFS()
+    monkeypatch.setattr(builder, "HfFileSystem", lambda token=None: fs_instance)
+    monkeypatch.setattr(builder.Dataset, "from_list", lambda rows: FakeDataset(rows))
+
+    def fake_load_dataset(name, *args, **kwargs):
+        return ({"text": f"row-{i}"} for i in range(3))
+
+    monkeypatch.setattr(builder, "load_dataset", fake_load_dataset)
+
+    spec = {
+        "name": "web",
+        "source_type": "fineweb_glob",
+        "file_glob": "datasets/HuggingFaceFW/fineweb-edu/data/*.parquet",
+        "rows": 2,
+        "shard_index": 0,
+    }
+
+    ds, meta = builder._load_fineweb_shard(spec, hf_token=None, allow_partial=False)
+
+    assert ds.num_rows == 2
+    assert meta["actual_rows"] == 2
+    assert meta["matched_glob"] == "datasets/HuggingFaceFW/fineweb-edu/*/*/*.parquet"
+    assert "datasets/HuggingFaceFW/fineweb-edu/data/*.parquet" in meta["tried_globs"]
+    assert fs_instance.calls[0] == "datasets/HuggingFaceFW/fineweb-edu/data/*.parquet"
+    assert fs_instance.calls[1] == "datasets/HuggingFaceFW/fineweb-edu/*/*/*.parquet"
+
+
+def test_load_fineweb_shard_errors_when_no_glob_matches(monkeypatch):
+    class FakeFS:
+        def __init__(self, token=None):
+            self.calls = []
+
+        def glob(self, pattern):
+            self.calls.append(pattern)
+            return []
+
+    monkeypatch.setattr(builder, "HfFileSystem", lambda token=None: FakeFS())
+
+    spec = {
+        "name": "web",
+        "source_type": "fineweb_glob",
+        "file_glob": "datasets/HuggingFaceFW/fineweb-edu/data/*.parquet",
+        "rows": 2,
+        "shard_index": 0,
+    }
+
+    with pytest.raises(RuntimeError, match="No FineWeb parquet files matched"):
+        builder._load_fineweb_shard(spec, hf_token=None, allow_partial=False)

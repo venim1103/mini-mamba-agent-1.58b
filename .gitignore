@@ -1,6 +1,7 @@
 __pycache__
 checkpoints
 local_data
+val_data
 .hf_*
 htmlcov/
 .coverage
