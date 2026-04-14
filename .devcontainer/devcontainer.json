@@ -20,6 +20,8 @@
   ],
   "containerEnv": {
     "REQUESTS_CA_BUNDLE": "/etc/ssl/certs/ca-certificates.crt",
+    "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
+    "CURL_CA_BUNDLE": "/etc/ssl/certs/ca-certificates.crt",
     "XDG_CACHE_HOME": "/home/vscode/.cache",
     "HF_HOME": "/home/vscode/.cache/huggingface",
     "PIP_CACHE_DIR": "/home/vscode/.cache/pip"
