@@ -22,10 +22,15 @@ def test_iter_new_checkpoint_files_filters_seen_and_extension(monkeypatch):
     assert found == ["checkpoints/a.pt"]
 
 
-def test_upload_checkpoint_success_records_file():
+def test_upload_checkpoint_success_records_file(monkeypatch):
     api = MagicMock()
     uploaded = set()
     logs = []
+
+    monkeypatch.setattr(background_sync.os.path, "exists", lambda _p: True)
+    monkeypatch.setattr(background_sync, "_is_old_enough", lambda _p, _age: True)
+    monkeypatch.setattr(background_sync, "_is_stable", lambda _p, _w, sleep_fn=None: True)
+    monkeypatch.setattr(background_sync, "_looks_like_valid_torch_zip", lambda _p: True)
 
     ok = background_sync.upload_checkpoint(
         api,
@@ -33,6 +38,9 @@ def test_upload_checkpoint_success_records_file():
         "org/repo",
         uploaded,
         sleep_before_upload=0,
+        min_file_age_seconds=0,
+        stabilize_window_seconds=0,
+        validate_zip=True,
         sleep_fn=lambda _: None,
         logger=logs.append,
     )
@@ -48,11 +56,16 @@ def test_upload_checkpoint_success_records_file():
     assert any("Backed up model.pt" in msg for msg in logs)
 
 
-def test_upload_checkpoint_failure_does_not_record_file():
+def test_upload_checkpoint_failure_does_not_record_file(monkeypatch):
     api = MagicMock()
     api.upload_file.side_effect = RuntimeError("boom")
     uploaded = set()
     logs = []
+
+    monkeypatch.setattr(background_sync.os.path, "exists", lambda _p: True)
+    monkeypatch.setattr(background_sync, "_is_old_enough", lambda _p, _age: True)
+    monkeypatch.setattr(background_sync, "_is_stable", lambda _p, _w, sleep_fn=None: True)
+    monkeypatch.setattr(background_sync, "_looks_like_valid_torch_zip", lambda _p: True)
 
     ok = background_sync.upload_checkpoint(
         api,
@@ -60,6 +73,9 @@ def test_upload_checkpoint_failure_does_not_record_file():
         "org/repo",
         uploaded,
         sleep_before_upload=0,
+        min_file_age_seconds=0,
+        stabilize_window_seconds=0,
+        validate_zip=True,
         sleep_fn=lambda _: None,
         logger=logs.append,
     )
@@ -91,6 +107,113 @@ def test_sync_once_counts_successes(monkeypatch):
     assert uploaded == {"checkpoints/a.pt", "checkpoints/b.pt"}
 
 
+def test_upload_checkpoint_defers_when_too_new(monkeypatch):
+    api = MagicMock()
+    uploaded = set()
+    logs = []
+
+    monkeypatch.setattr(background_sync.os.path, "exists", lambda _p: True)
+    monkeypatch.setattr(background_sync, "_is_old_enough", lambda _p, _age: False)
+
+    ok = background_sync.upload_checkpoint(
+        api,
+        "checkpoints/model.pt",
+        "org/repo",
+        uploaded,
+        sleep_before_upload=0,
+        min_file_age_seconds=60,
+        stabilize_window_seconds=0,
+        validate_zip=False,
+        sleep_fn=lambda _: None,
+        logger=logs.append,
+    )
+
+    assert ok is False
+    api.upload_file.assert_not_called()
+    assert any("too new" in msg for msg in logs)
+
+
+def test_upload_checkpoint_defers_when_unstable(monkeypatch):
+    api = MagicMock()
+    uploaded = set()
+    logs = []
+
+    monkeypatch.setattr(background_sync.os.path, "exists", lambda _p: True)
+    monkeypatch.setattr(background_sync, "_is_old_enough", lambda _p, _age: True)
+    monkeypatch.setattr(background_sync, "_is_stable", lambda _p, _w, sleep_fn=None: False)
+
+    ok = background_sync.upload_checkpoint(
+        api,
+        "checkpoints/model.pt",
+        "org/repo",
+        uploaded,
+        sleep_before_upload=0,
+        min_file_age_seconds=60,
+        stabilize_window_seconds=10,
+        validate_zip=False,
+        sleep_fn=lambda _: None,
+        logger=logs.append,
+    )
+
+    assert ok is False
+    api.upload_file.assert_not_called()
+    assert any("still changing" in msg for msg in logs)
+
+
+def test_upload_checkpoint_defers_when_zip_invalid(monkeypatch):
+    api = MagicMock()
+    uploaded = set()
+    logs = []
+
+    monkeypatch.setattr(background_sync.os.path, "exists", lambda _p: True)
+    monkeypatch.setattr(background_sync, "_is_old_enough", lambda _p, _age: True)
+    monkeypatch.setattr(background_sync, "_is_stable", lambda _p, _w, sleep_fn=None: True)
+    monkeypatch.setattr(background_sync, "_looks_like_valid_torch_zip", lambda _p: False)
+
+    ok = background_sync.upload_checkpoint(
+        api,
+        "checkpoints/model.pt",
+        "org/repo",
+        uploaded,
+        sleep_before_upload=0,
+        min_file_age_seconds=60,
+        stabilize_window_seconds=10,
+        validate_zip=True,
+        sleep_fn=lambda _: None,
+        logger=logs.append,
+    )
+
+    assert ok is False
+    api.upload_file.assert_not_called()
+    assert any("not valid yet" in msg for msg in logs)
+
+
+def test_upload_checkpoint_defers_on_os_error_during_preflight(monkeypatch):
+    api = MagicMock()
+    uploaded = set()
+    logs = []
+
+    monkeypatch.setattr(background_sync.os.path, "exists", lambda _p: True)
+    monkeypatch.setattr(background_sync, "_is_old_enough", lambda _p, _age: (_ for _ in ()).throw(OSError("file vanished")))
+
+    ok = background_sync.upload_checkpoint(
+        api,
+        "checkpoints/model.pt",
+        "org/repo",
+        uploaded,
+        sleep_before_upload=0,
+        min_file_age_seconds=60,
+        stabilize_window_seconds=0,
+        validate_zip=False,
+        sleep_fn=lambda _: None,
+        logger=logs.append,
+    )
+
+    assert ok is False
+    api.upload_file.assert_not_called()
+    assert any("OS error during preflight" in msg for msg in logs)
+
+
 def test_main_requires_repo_id(monkeypatch):
     monkeypatch.delenv("REPO_ID", raising=False)
 
@@ -106,12 +229,25 @@ def test_main_initializes_api_and_runs_loop(monkeypatch):
 
     called = {}
 
-    def fake_run_sync_loop(api, repo_id, checkpoint_dir, poll_interval, sleep_before_upload, logger):
+    def fake_run_sync_loop(
+        api,
+        repo_id,
+        checkpoint_dir,
+        poll_interval,
+        sleep_before_upload,
+        min_file_age_seconds,
+        stabilize_window_seconds,
+        validate_zip,
+        logger,
+    ):
         called["api"] = api
         called["repo_id"] = repo_id
         called["checkpoint_dir"] = checkpoint_dir
         called["poll_interval"] = poll_interval
         called["sleep_before_upload"] = sleep_before_upload
+        called["min_file_age_seconds"] = min_file_age_seconds
+        called["stabilize_window_seconds"] = stabilize_window_seconds
+        called["validate_zip"] = validate_zip
         called["logger"] = logger
 
     monkeypatch.setattr(background_sync, "run_sync_loop", fake_run_sync_loop)
@@ -125,6 +261,9 @@ def test_main_initializes_api_and_runs_loop(monkeypatch):
         "checkpoint_dir": background_sync.CHECKPOINT_DIR,
         "poll_interval": background_sync.DEFAULT_POLL_INTERVAL,
         "sleep_before_upload": background_sync.DEFAULT_SLEEP_BEFORE_UPLOAD,
+        "min_file_age_seconds": background_sync.DEFAULT_MIN_FILE_AGE,
+        "stabilize_window_seconds": background_sync.DEFAULT_STABILIZE_WINDOW,
+        "validate_zip": background_sync.DEFAULT_VALIDATE_ZIP,
         "logger": background_sync._log,
     }
 
@@ -135,18 +274,48 @@ def test_main_uses_sync_timing_env_overrides(monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "token")
     monkeypatch.setenv("SYNC_POLL_INTERVAL", "3")
     monkeypatch.setenv("SYNC_SLEEP_BEFORE_UPLOAD", "1")
+    monkeypatch.setenv("SYNC_MIN_FILE_AGE", "4")
+    monkeypatch.setenv("SYNC_STABILIZE_WINDOW", "2")
+    monkeypatch.setenv("SYNC_VALIDATE_ZIP", "0")
     monkeypatch.setattr(background_sync, "HfApi", MagicMock(return_value=fake_api))
 
     called = {}
 
-    def fake_run_sync_loop(api, repo_id, checkpoint_dir, poll_interval, sleep_before_upload, logger):
+    def fake_run_sync_loop(
+        api,
+        repo_id,
+        checkpoint_dir,
+        poll_interval,
+        sleep_before_upload,
+        min_file_age_seconds,
+        stabilize_window_seconds,
+        validate_zip,
+        logger,
+    ):
         called["poll_interval"] = poll_interval
         called["sleep_before_upload"] = sleep_before_upload
+        called["min_file_age_seconds"] = min_file_age_seconds
+        called["stabilize_window_seconds"] = stabilize_window_seconds
+        called["validate_zip"] = validate_zip
 
     monkeypatch.setattr(background_sync, "run_sync_loop", fake_run_sync_loop)
     background_sync.main()
 
-    assert called == {"poll_interval": 3, "sleep_before_upload": 1}
+    assert called == {
+        "poll_interval": 3,
+        "sleep_before_upload": 1,
+        "min_file_age_seconds": 4,
+        "stabilize_window_seconds": 2,
+        "validate_zip": False,
+    }
+
+
+def test_read_bool_env_accepts_common_values(monkeypatch):
+    monkeypatch.setenv("SYNC_VALIDATE_ZIP", "yes")
+    assert background_sync._read_bool_env("SYNC_VALIDATE_ZIP", False, logger=lambda _: None) is True
+
+    monkeypatch.setenv("SYNC_VALIDATE_ZIP", "0")
+    assert background_sync._read_bool_env("SYNC_VALIDATE_ZIP", True, logger=lambda _: None) is False
 
 
 def test_main_self_check_mode_success(monkeypatch):

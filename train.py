@@ -283,7 +283,8 @@ def run_training_steps(model, raw_model, optimizers, scheduler,
 
         if step > 0 and step % SAVE_EVERY == 0 and is_main_process():
             ckpt_path = os.path.join(checkpoint_dir, f"step_{step:06d}.pt")
-            torch.save({
+            tmp_ckpt_path = ckpt_path + ".tmp"
+            payload = {
                 'step': step,
                 'total_tokens': total_tokens,
                 'model_state_dict': raw_model.state_dict(),
@@ -292,8 +293,19 @@ def run_training_steps(model, raw_model, optimizers, scheduler,
                 'mamba_core_opt_state': mamba_core_opt.state_dict(),
                 'scaler_state': scaler.state_dict(),
                 'wandb_run_id': wandb.run.id if wandb.run else None
-            }, ckpt_path)
-            print(f"  [Save] Checkpoint written to {ckpt_path}")
+            }
+            try:
+                with open(tmp_ckpt_path, 'wb') as handle:
+                    torch.save(payload, handle)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                tmp_size_mb = os.path.getsize(tmp_ckpt_path) / (1024**2)
+                print(f"  [Save] Temp checkpoint {tmp_size_mb:.2f} MB ready, renaming to final location...")
+                os.replace(tmp_ckpt_path, ckpt_path)
+                print(f"  [Save] Checkpoint written atomically to {ckpt_path}")
+            finally:
+                if os.path.exists(tmp_ckpt_path):
+                    os.remove(tmp_ckpt_path)
         barrier()
 
 

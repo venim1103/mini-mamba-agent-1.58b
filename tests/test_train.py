@@ -276,7 +276,9 @@ class TestRunTrainingStepsIntegration:
         )
 
         ckpt_files = list(tmp_path.glob("*.pt"))
+        tmp_files = list(tmp_path.glob("*.tmp"))
         assert len(ckpt_files) == 1, f"Expected 1 checkpoint, found: {ckpt_files}"
+        assert len(tmp_files) == 0, f"Leftover .tmp files found (atomic save cleanup failed): {tmp_files}"
 
         # weights_only=False required: optimizer states contain complex Python objects
         ckpt = torch.load(ckpt_files[0], map_location='cpu', weights_only=False)
@@ -298,3 +300,92 @@ class TestRunTrainingStepsIntegration:
         ]
         assert wandb_loss_logs, "Expected at least one Train/Loss wandb log entry"
         assert wandb_loss_logs[0] == pytest.approx(1.0 / (TINY_BATCH * SEQ_LEN))
+
+
+class TestAtomicCheckpointSave:
+    """Test the atomic checkpoint save pattern using temp file + fsync + rename."""
+
+    def test_atomic_save_and_load_cycle(self, tmp_path):
+        """Verify atomic save produces valid checkpoints that can be loaded."""
+        import os
+        
+        ckpt_path = str(tmp_path / "step_000100.pt")
+        tmp_ckpt_path = ckpt_path + ".tmp"
+        
+        # Create a test payload
+        payload = {
+            'step': 100,
+            'total_tokens': 50000,
+            'model_state_dict': {'weight': torch.randn(10, 10)},
+            'muon_opt_state': {'momentum': torch.randn(10, 10)},
+            'adam_opt_state': {'lr': 1e-4},
+            'mamba_core_opt_state': {},
+            'scaler_state': {'_scale': 65536.0},
+            'wandb_run_id': 'test_run_123',
+        }
+        
+        # Save using atomic pattern (mirrors train.py checkpoint save)
+        try:
+            with open(tmp_ckpt_path, 'wb') as handle:
+                torch.save(payload, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            
+            # Get temp file size and verify it exists
+            tmp_size_bytes = os.path.getsize(tmp_ckpt_path)
+            assert tmp_size_bytes > 0, "Temp checkpoint should have non-zero size"
+            tmp_size_mb = tmp_size_bytes / (1024**2)
+            assert tmp_size_mb > 0.001, f"Expected temp checkpoint >1KB, got {tmp_size_bytes} bytes"
+            
+            # Atomic rename
+            os.replace(tmp_ckpt_path, ckpt_path)
+            
+            # Verify final file exists and temp is gone
+            assert os.path.exists(ckpt_path), "Final checkpoint should exist"
+            assert not os.path.exists(tmp_ckpt_path), "Temp file should not exist after rename"
+            
+        finally:
+            # Cleanup in case of test failure
+            if os.path.exists(tmp_ckpt_path):
+                os.remove(tmp_ckpt_path)
+        
+        # Load and verify integrity
+        loaded = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        
+        assert loaded['step'] == 100
+        assert loaded['total_tokens'] == 50000
+        assert loaded['wandb_run_id'] == 'test_run_123'
+        assert torch.allclose(
+            loaded['model_state_dict']['weight'],
+            payload['model_state_dict']['weight']
+        )
+        assert torch.allclose(
+            loaded['muon_opt_state']['momentum'],
+            payload['muon_opt_state']['momentum']
+        )
+
+    def test_temp_file_cleanup_on_exception(self, tmp_path):
+        """Verify temp file is cleaned up if save fails."""
+        import os
+        
+        ckpt_path = str(tmp_path / "step_000200.pt")
+        tmp_ckpt_path = ckpt_path + ".tmp"
+        
+        # Create temp file and close handle
+        with open(tmp_ckpt_path, 'wb') as f:
+            f.write(b"incomplete data")
+        
+        assert os.path.exists(tmp_ckpt_path), "Setup: temp file should exist"
+        
+        # Simulate the finally block cleanup (mirrors train.py error handling)
+        with pytest.raises(RuntimeError, match="Simulated save failure"):
+            try:
+                # Simulate a failure that would prevent rename
+                raise RuntimeError("Simulated save failure")
+            finally:
+                if os.path.exists(tmp_ckpt_path):
+                    os.remove(tmp_ckpt_path)
+        
+        # After finally block runs, temp file should be cleaned up
+        assert not os.path.exists(tmp_ckpt_path), "Temp file should be cleaned up"
+        assert not os.path.exists(ckpt_path), "Final checkpoint should not exist"
