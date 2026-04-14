@@ -5,3 +5,4 @@ torchvision==0.25.0+cu128
 torchaudio==2.10.0+cu128
 triton==3.6.0
 bitsandbytes
+kaggle
