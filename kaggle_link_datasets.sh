@@ -13,23 +13,106 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ==========================================
-# 1. KAGGLE ENVIRONMENT CHECK
-# ==========================================
-if [ -z "${KAGGLE_KERNEL_RUN_TYPE}" ] && [ ! -d "/kaggle/input" ]; then
-    echo "Not running in a Kaggle environment. Skipping Kaggle dataset linking."
-    exit 0
+set -u
+
+usage() {
+    cat <<'USAGE'
+Usage: ./kaggle_link_datasets.sh [--env auto|kaggle|colab] [--colab-version N]
+
+Options:
+  --env auto|kaggle|colab   Runtime environment selection (default: auto).
+  --colab-version N         Dataset version to use in Colab kagglehub paths
+                            (default: 1).
+
+Environment overrides (optional):
+  KAGGLE_INPUT_ROOT         Override Kaggle input root (default: /kaggle/input).
+  COLAB_KAGGLEHUB_ROOT      Override Colab kagglehub root (default: /root/.cache/kagglehub).
+USAGE
+}
+
+MODE="auto"
+COLAB_DATASET_VERSION="1"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --env)
+            MODE="${2:-}"
+            shift 2
+            ;;
+        --colab-version)
+            COLAB_DATASET_VERSION="${2:-}"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+if [[ "$MODE" != "auto" && "$MODE" != "kaggle" && "$MODE" != "colab" ]]; then
+    echo "Invalid --env value: $MODE"
+    usage
+    exit 1
 fi
 
-echo "Kaggle environment detected. Preparing data directories..."
+KAGGLE_INPUT_ROOT="${KAGGLE_INPUT_ROOT:-/kaggle/input}"
+COLAB_KAGGLEHUB_ROOT="${COLAB_KAGGLEHUB_ROOT:-/root/.cache/kagglehub}"
+
+# ==========================================
+# 1. ENVIRONMENT CHECK / SELECTION
+# ==========================================
+if [[ "$MODE" == "auto" ]]; then
+    if [[ -n "${KAGGLE_KERNEL_RUN_TYPE:-}" || -d "$KAGGLE_INPUT_ROOT" ]]; then
+        MODE="kaggle"
+    elif [[ -n "${COLAB_RELEASE_TAG:-}" || -d "$COLAB_KAGGLEHUB_ROOT/datasets" ]]; then
+        MODE="colab"
+    else
+        echo "Not running in a detected Kaggle/Colab environment. Skipping dataset linking."
+        exit 0
+    fi
+fi
+
+echo "Environment: $MODE"
+
+if [[ "$MODE" == "kaggle" ]]; then
+    PREPATH="$KAGGLE_INPUT_ROOT"
+    POSTPATH=""
+    echo "Using Kaggle dataset root: $PREPATH"
+else
+    PREPATH="$COLAB_KAGGLEHUB_ROOT"
+    POSTPATH="/versions/$COLAB_DATASET_VERSION"
+    echo "Using Colab dataset root: $PREPATH (version: $COLAB_DATASET_VERSION)"
+fi
+
+DATASET_BASE="$PREPATH/datasets/venim1103"
+
+dataset_root() {
+    local dataset_name="$1"
+    echo "$DATASET_BASE/$dataset_name$POSTPATH"
+}
+
+link_dataset_files() {
+    local source_dir="$1"
+    local target_dir="$2"
+
+    if [[ -d "$source_dir" ]]; then
+        find "$source_dir" -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} "$target_dir"/ \; 2>/dev/null
+    fi
+}
+
+echo "Preparing data directories..."
 
 # ==========================================
 # 2. CREATE DIRECTORIES & SYMLINKS
 # ==========================================
-# Clean slate just in case
 rm -rf local_data
 
-# Make the EXACT folders your data.py DATA_WEIGHTS dictionary expects
 mkdir -p local_data/train/web/fineweb
 mkdir -p local_data/train/logic/numinamath-cot
 mkdir -p local_data/train/logic/fldx2
@@ -44,26 +127,29 @@ mkdir -p local_data/sft/tool_calling/apigen-fc
 mkdir -p local_data/sft/tool_calling/xlam-irrelevance
 mkdir -p local_data/rl/reasoning
 
-# Hunt down every .parquet/.jsonl file and link them straight into the flat target folders!
+PRETRAIN_SMALLS_ROOT="$(dataset_root mini-mamba-1b58-pretrain-smalls)"
+FINEWEB_ROOT="$(dataset_root mini-mamba-1b58-fineweb-edu-10bt)"
+SFT_RL_ROOT="$(dataset_root mini-mamba-1b58-sft-rl-data)"
+
 echo "Symlinking Pre-train Smalls..."
-find /kaggle/input/datasets/venim1103/mini-mamba-1b58-pretrain-smalls/logic/numinamath -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/train/logic/numinamath-cot/ \; 2>/dev/null
-find /kaggle/input/datasets/venim1103/mini-mamba-1b58-pretrain-smalls/logic/fldx2 -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/train/logic/fldx2/ \; 2>/dev/null
-find /kaggle/input/datasets/venim1103/mini-mamba-1b58-pretrain-smalls/code/tiny-codes -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/train/code/tiny-codes/ \; 2>/dev/null
-find /kaggle/input/datasets/venim1103/mini-mamba-1b58-pretrain-smalls/tools/toolformer -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/train/tools/toolformer/ \; 2>/dev/null
+link_dataset_files "$PRETRAIN_SMALLS_ROOT/logic/numinamath" "local_data/train/logic/numinamath-cot"
+link_dataset_files "$PRETRAIN_SMALLS_ROOT/logic/fldx2" "local_data/train/logic/fldx2"
+link_dataset_files "$PRETRAIN_SMALLS_ROOT/code/tiny-codes" "local_data/train/code/tiny-codes"
+link_dataset_files "$PRETRAIN_SMALLS_ROOT/tools/toolformer" "local_data/train/tools/toolformer"
 
 echo "Symlinking FineWeb..."
-find /kaggle/input/datasets/venim1103/mini-mamba-1b58-fineweb-edu-10bt -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/train/web/fineweb/ \; 2>/dev/null
+link_dataset_files "$FINEWEB_ROOT" "local_data/train/web/fineweb"
 
 echo "Symlinking SFT & RL Datasets..."
-find /kaggle/input/datasets/venim1103/mini-mamba-1b58-sft-rl-data/sft/open-math -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/sft/reasoning/open-math-reasoning/ \; 2>/dev/null
-find /kaggle/input/datasets/venim1103/mini-mamba-1b58-sft-rl-data/sft/nemotron -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/sft/reasoning/nemotron-post-training/ \; 2>/dev/null
-find /kaggle/input/datasets/venim1103/mini-mamba-1b58-sft-rl-data/sft/openr1 -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/sft/reasoning/openr1-math/ \; 2>/dev/null
-find /kaggle/input/datasets/venim1103/mini-mamba-1b58-sft-rl-data/sft/smoltalk -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/sft/mixed/smol-smoltalk/ \; 2>/dev/null
-find /kaggle/input/datasets/venim1103/mini-mamba-1b58-sft-rl-data/sft/apigen -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/sft/tool_calling/apigen-fc/ \; 2>/dev/null
-find /kaggle/input/datasets/venim1103/mini-mamba-1b58-sft-rl-data/sft/xlam -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/sft/tool_calling/xlam-irrelevance/ \; 2>/dev/null
+link_dataset_files "$SFT_RL_ROOT/sft/open-math" "local_data/sft/reasoning/open-math-reasoning"
+link_dataset_files "$SFT_RL_ROOT/sft/nemotron" "local_data/sft/reasoning/nemotron-post-training"
+link_dataset_files "$SFT_RL_ROOT/sft/openr1" "local_data/sft/reasoning/openr1-math"
+link_dataset_files "$SFT_RL_ROOT/sft/smoltalk" "local_data/sft/mixed/smol-smoltalk"
+link_dataset_files "$SFT_RL_ROOT/sft/apigen" "local_data/sft/tool_calling/apigen-fc"
+link_dataset_files "$SFT_RL_ROOT/sft/xlam" "local_data/sft/tool_calling/xlam-irrelevance"
 
 # Link RL reasoning to the same SFT math source
-find /kaggle/input/datasets/venim1103/mini-mamba-1b58-sft-rl-data/sft/open-math -type f \( -name "*.parquet" -o -name "*.jsonl" \) -exec ln -s {} local_data/rl/reasoning/ \; 2>/dev/null
+link_dataset_files "$SFT_RL_ROOT/sft/open-math" "local_data/rl/reasoning"
 
 # ==========================================
 # 3. SAFETY VALIDATION
@@ -78,9 +164,9 @@ fi
 FILE_COUNT=$(find -L local_data -type f \( -name "*.parquet" -o -name "*.jsonl" \) 2>/dev/null | wc -l)
 
 if [ "$FILE_COUNT" -eq 0 ]; then
-    echo "   ERROR: No .parquet or .jsonl files found in local_data!"
-    echo "   This usually means the Kaggle Datasets aren't attached to this notebook,"
-    echo "   or the dataset folder names in /kaggle/input/ don't match the script."
+    echo "ERROR: No .parquet or .jsonl files found in local_data!"
+    echo "This usually means datasets are not available in the selected environment ($MODE),"
+    echo "or dataset folders/versions do not match expected layout."
     exit 1
 else
     echo "Success! Found $FILE_COUNT valid data files perfectly linked."
