@@ -16,36 +16,88 @@ import os
 import subprocess
 
 REPO_DIR = "/kaggle/working/mini-mamba-agent-1.58b"
+REQUIRED_SECRET_KEYS = ("HF_TOKEN", "WANDB_API_KEY", "REPO_ID")
+REPO_ENV_VAR = "WATCHDOG_REPO_DIR"
 
 
-def set_repo_directory(repo_dir: str = REPO_DIR, *, logger=print) -> bool:
-    """Switch to the repository directory if it exists."""
-    if os.path.exists(repo_dir):
-        os.chdir(repo_dir)
-        logger(f"Directory set to: {os.getcwd()}")
-        return True
-    logger("Repository not found! Please run Cell 1 first to clone the code.")
+def _candidate_repo_dirs(explicit_repo_dir: str | None = None) -> list[str]:
+    candidates = []
+    if explicit_repo_dir:
+        candidates.append(explicit_repo_dir)
+    env_repo_dir = os.environ.get(REPO_ENV_VAR)
+    if env_repo_dir:
+        candidates.append(env_repo_dir)
+    candidates.append(REPO_DIR)
+    candidates.append(os.getcwd())
+    candidates.append(os.path.dirname(os.path.abspath(__file__)))
+    # De-duplicate while preserving order.
+    return list(dict.fromkeys(candidates))
+
+
+def set_repo_directory(repo_dir: str | None = None, *, logger=print) -> bool:
+    """Switch to a usable repository directory across Kaggle, Colab, or local setups."""
+    for candidate in _candidate_repo_dirs(repo_dir):
+        if os.path.exists(candidate):
+            os.chdir(candidate)
+            logger(f"Directory set to: {os.getcwd()}")
+            return True
+    logger(
+        "Repository not found! Set WATCHDOG_REPO_DIR or run this script from the cloned repo root."
+    )
     return False
 
 
-def load_kaggle_secrets(*, logger=print) -> dict[str, str]:
-    """Fetch secrets from Kaggle and export required env vars."""
-    try:
-        from kaggle_secrets import UserSecretsClient
-    except ImportError as exc:
-        raise RuntimeError("kaggle_secrets is only available in Kaggle notebooks") from exc
+def _load_kaggle_secrets() -> dict[str, str]:
+    from kaggle_secrets import UserSecretsClient
 
     user_secrets = UserSecretsClient()
-    hf_token = user_secrets.get_secret("HF_TOKEN")
-    wandb_api_key = user_secrets.get_secret("WANDB_API_KEY")
-    repo_id = user_secrets.get_secret("REPO_ID")
+    return {key: user_secrets.get_secret(key) for key in REQUIRED_SECRET_KEYS}
 
-    os.environ["HF_TOKEN"] = hf_token
-    os.environ["WANDB_API_KEY"] = wandb_api_key
-    os.environ["REPO_ID"] = repo_id
 
-    logger("Loaded HF_TOKEN, WANDB_API_KEY, and REPO_ID from Kaggle secrets")
-    return {"HF_TOKEN": hf_token, "WANDB_API_KEY": wandb_api_key, "REPO_ID": repo_id}
+def _load_colab_secrets() -> dict[str, str]:
+    from google.colab import userdata
+
+    return {key: userdata.get(key) for key in REQUIRED_SECRET_KEYS}
+
+
+def load_runtime_secrets(*, logger=print) -> dict[str, str]:
+    """Resolve required secrets from env, then optional notebook providers."""
+    resolved = {
+        key: os.environ.get(key) for key in REQUIRED_SECRET_KEYS if os.environ.get(key)
+    }
+    missing = [key for key in REQUIRED_SECRET_KEYS if key not in resolved]
+    if not missing:
+        logger("Using secrets already present in environment variables")
+        return resolved
+
+    providers = (
+        ("Kaggle secrets", _load_kaggle_secrets),
+        ("Colab userdata", _load_colab_secrets),
+    )
+    for provider_name, provider_fn in providers:
+        try:
+            provider_values = provider_fn()
+        except Exception:
+            continue
+        for key in missing:
+            value = provider_values.get(key)
+            if value:
+                resolved[key] = value
+                os.environ[key] = value
+        missing = [key for key in REQUIRED_SECRET_KEYS if key not in resolved]
+        if not missing:
+            logger(f"Loaded {', '.join(REQUIRED_SECRET_KEYS)} from {provider_name}")
+            return resolved
+
+    raise RuntimeError(
+        f"Missing required secrets: {', '.join(missing)}. "
+        "Provide them via environment variables or notebook secret manager."
+    )
+
+
+def load_kaggle_secrets(*, logger=print) -> dict[str, str]:
+    """Backward-compatible wrapper around cross-environment secret loading."""
+    return load_runtime_secrets(logger=logger)
 
 
 def start_background_sync(*, log_path: str = "sync_logs.txt"):
@@ -87,9 +139,9 @@ def run_sync_self_check(*, log_path: str = "sync_logs.txt") -> int:
 
 
 def main():
-    if not set_repo_directory(REPO_DIR):
+    if not set_repo_directory():
         return 1
-    load_kaggle_secrets()
+    load_runtime_secrets()
     check_code = run_sync_self_check(log_path="sync_logs.txt")
     if check_code != 0:
         print("Background sync self-check failed. See sync_logs.txt for details.")
