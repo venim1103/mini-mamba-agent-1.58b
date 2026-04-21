@@ -259,11 +259,6 @@ def evaluate_checkpoint(model, tokenizer, checkpoint_path: str, pillars, args):
     checkpoint_step = int(ckpt.get("step", parse_checkpoint_step(checkpoint_path)))
     checkpoint_tokens = int(ckpt.get("total_tokens", 0))
 
-    metrics = {
-        "Validation/System/CheckpointStep": checkpoint_step,
-        "Validation/System/TotalTokens": checkpoint_tokens,
-    }
-
     overall_loss_sum = 0.0
     overall_tokens = 0
 
@@ -289,21 +284,32 @@ def evaluate_checkpoint(model, tokenizer, checkpoint_path: str, pillars, args):
         )
 
         prefix = f"Validation/{pillar_name}"
-        metrics[f"{prefix}/Loss"] = pillar_metrics["loss"]
-        metrics[f"{prefix}/Perplexity"] = pillar_metrics["perplexity"]
-        metrics[f"{prefix}/Tokens"] = pillar_metrics["tokens"]
-        metrics[f"{prefix}/Documents"] = pillar_metrics["documents"]
-        metrics[f"{prefix}/Windows"] = pillar_metrics["windows"]
+        wandb.log(
+            {
+                f"{prefix}/Loss": pillar_metrics["loss"],
+                f"{prefix}/Perplexity": pillar_metrics["perplexity"],
+                f"{prefix}/Tokens": pillar_metrics["tokens"],
+                f"{prefix}/Documents": pillar_metrics["documents"],
+                f"{prefix}/Windows": pillar_metrics["windows"],
+            },
+            step=checkpoint_step,
+            commit=False,
+        )
 
     overall_loss = overall_loss_sum / max(overall_tokens, 1)
     overall_ppl = float(math.exp(min(overall_loss, MAX_SAFE_EXP)))
 
-    metrics["Validation/Overall/Loss"] = overall_loss
-    metrics["Validation/Overall/Perplexity"] = overall_ppl
-    metrics["Validation/Overall/Tokens"] = overall_tokens
-
     print(f"  overall     loss={overall_loss:.4f} ppl={overall_ppl:.2f} tokens={overall_tokens}")
-    wandb.log(metrics, step=checkpoint_step)
+    wandb.log(
+        {
+            "Validation/System/CheckpointStep": checkpoint_step,
+            "Validation/System/TotalTokens": checkpoint_tokens,
+            "Validation/Overall/Loss": overall_loss,
+            "Validation/Overall/Perplexity": overall_ppl,
+            "Validation/Overall/Tokens": overall_tokens,
+        },
+        step=checkpoint_step,
+    )
     return True
 
 
@@ -383,6 +389,7 @@ def main() -> int:
         name=run_name,
         id=args.wandb_run_id,
         resume=args.wandb_resume,
+        settings=wandb.Settings(start_method="thread"),
         config={
             "mode": args.mode,
             "manifest_path": args.manifest_path,
